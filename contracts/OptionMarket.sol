@@ -1,18 +1,13 @@
 //SPDX-License-Identifier: ISC
 pragma solidity 0.8.16;
-
-// Libraries
-import "./synthetix/DecimalMath.sol";
-import "./libraries/ConvertDecimals.sol";
 import "openzeppelin-contracts-4.4.1/utils/math/SafeCast.sol";
-
-// Inherited
-import "./synthetix/Owned.sol";
-import "./libraries/SimpleInitializable.sol";
 import "openzeppelin-contracts-4.4.1/security/ReentrancyGuard.sol";
-
-// Interfaces
+import "./libraries/SimpleInitializable.sol";
+import "./libraries/ConvertDecimals.sol";
+import "./synthetix/Owned.sol";
+import "./synthetix/DecimalMath.sol";
 import "./interfaces/IERC20Decimals.sol";
+
 import "./BaseExchangeAdapter.sol";
 import "./LiquidityPool.sol";
 import "./OptionToken.sol";
@@ -20,21 +15,13 @@ import "./OptionGreekCache.sol";
 import "./ShortCollateral.sol";
 import "./OptionMarketPricer.sol";
 
-/**
- * @title OptionMarket
- * @author Lyra
- * @dev An AMM which allows users to trade options. Supports both buying and selling options. Also handles liquidating
- * short positions.
- */
 contract OptionMarket is Owned, SimpleInitializable, ReentrancyGuard {
   using DecimalMath for uint;
-
   enum TradeDirection {
     OPEN,
     CLOSE,
     LIQUIDATE
   }
-
   enum OptionType {
     LONG_CALL,
     LONG_PUT,
@@ -42,8 +29,6 @@ contract OptionMarket is Owned, SimpleInitializable, ReentrancyGuard {
     SHORT_CALL_QUOTE,
     SHORT_PUT_QUOTE
   }
-
-  /// @notice For returning more specific errors
   enum NonZeroValues {
     BASE_IV,
     SKEW,
@@ -51,81 +36,41 @@ contract OptionMarket is Owned, SimpleInitializable, ReentrancyGuard {
     ITERATIONS,
     STRIKE_ID
   }
-
-  ///////////////////
-  // Internal Data //
-  ///////////////////
-
   struct Strike {
-    // strike listing identifier
     uint id;
-    // strike price
     uint strikePrice;
-    // volatility component specific to the strike listing (boardIv * skew = vol of strike)
     uint skew;
-    // total user long call exposure
     uint longCall;
-    // total user short call (base collateral) exposure
     uint shortCallBase;
-    // total user short call (quote collateral) exposure
     uint shortCallQuote;
-    // total user long put exposure
     uint longPut;
-    // total user short put (quote collateral) exposure
     uint shortPut;
-    // id of board to which strike belongs
     uint boardId;
   }
-
   struct OptionBoard {
-    // board identifier
     uint id;
-    // expiry of all strikes belonging to board
     uint expiry;
-    // volatility component specific to board (boardIv * skew = vol of strike)
     uint iv;
-    // admin settable flag blocking all trading on this board
     bool frozen;
-    // list of all strikes belonging to this board
     uint[] strikeIds;
   }
-
-  ///////////////
-  // In-memory //
-  ///////////////
-
   struct OptionMarketParameters {
-    // max allowable expiry of added boards
     uint maxBoardExpiry;
-    // security module address
     address securityModule;
-    // fee portion reserved for Lyra DAO
     uint feePortionReserved;
-    // expected fee charged to LPs, used for pricing short_call_base settlement
     uint staticBaseSettlementFee;
   }
-
   struct TradeInputParameters {
-    // id of strike
     uint strikeId;
-    // OptionToken ERC721 id for position (set to 0 for new positions)
     uint positionId;
-    // number of sub-orders to break order into (reduces slippage)
     uint iterations;
-    // type of option to trade
     OptionType optionType;
-    // number of contracts to trade
     uint amount;
-    // final amount of collateral to leave in OptionToken position
     uint setCollateralTo;
-    // revert trade if totalCost is below this value
     uint minTotalCost;
-    // revert trade if totalCost is above this value
     uint maxTotalCost;
-    // referrer emitted in Trade event, no on-chain interaction
     address referrer;
   }
-
   struct TradeParameters {
     bool isBuy;
     bool isForceClose;
@@ -137,7 +82,6 @@ contract OptionMarket is Owned, SimpleInitializable, ReentrancyGuard {
     uint spotPrice;
     LiquidityPool.Liquidity liquidity;
   }
-
   struct TradeEventData {
     uint strikeId;
     uint expiry;
@@ -151,27 +95,21 @@ contract OptionMarket is Owned, SimpleInitializable, ReentrancyGuard {
     uint reservedFee;
     uint totalCost;
   }
-
   struct LiquidationEventData {
     address rewardBeneficiary;
     address caller;
-    uint returnCollateral; // quote || base
-    uint lpPremiums; // quote || base
-    uint lpFee; // quote || base
-    uint liquidatorFee; // quote || base
-    uint smFee; // quote || base
-    uint insolventAmount; // quote
+    uint returnCollateral;
+    uint lpPremiums;
+    uint lpFee;
+    uint liquidatorFee;
+    uint smFee;
+    uint insolventAmount;
   }
-
   struct Result {
     uint positionId;
     uint totalCost;
     uint totalFee;
   }
-
-  ///////////////
-  // Variables //
-  ///////////////
 
   BaseExchangeAdapter internal exchangeAdapter;
   LiquidityPool internal liquidityPool;
@@ -179,36 +117,21 @@ contract OptionMarket is Owned, SimpleInitializable, ReentrancyGuard {
   OptionGreekCache internal greekCache;
   ShortCollateral internal shortCollateral;
   OptionToken internal optionToken;
-  IERC20Decimals public quoteAsset;
-  IERC20Decimals public baseAsset;
-
   uint internal nextStrikeId = 1;
   uint internal nextBoardId = 1;
   uint[] internal liveBoards;
-
   OptionMarketParameters internal optionMarketParams;
-
   mapping(uint => OptionBoard) internal optionBoards;
   mapping(uint => Strike) internal strikes;
-  mapping(uint => uint) public boardToPriceAtExpiry;
   mapping(uint => uint) internal strikeToBaseReturnedRatio;
-  mapping(uint => uint) public scaledLongsForBoard; // calculated at expiry, used for contract adjustments
 
+  IERC20Decimals public quoteAsset;
+  IERC20Decimals public baseAsset;
+  mapping(uint => uint) public boardToPriceAtExpiry;
+  mapping(uint => uint) public scaledLongsForBoard;
   constructor() Owned() {}
 
-  /**
-   * @dev Initialize the contract.
-   */
-  function init(
-    BaseExchangeAdapter _exchangeAdapter,
-    LiquidityPool _liquidityPool,
-    OptionMarketPricer _optionPricer,
-    OptionGreekCache _greekCache,
-    ShortCollateral _shortCollateral,
-    OptionToken _optionToken,
-    IERC20Decimals _quoteAsset,
-    IERC20Decimals _baseAsset
-  ) external onlyOwner initializer {
+  function init(BaseExchangeAdapter _exchangeAdapter, LiquidityPool _liquidityPool, OptionMarketPricer _optionPricer, OptionGreekCache _greekCache, ShortCollateral _shortCollateral, OptionToken _optionToken, IERC20Decimals _quoteAsset, IERC20Decimals _baseAsset) external onlyOwner initializer {
     exchangeAdapter = _exchangeAdapter;
     liquidityPool = _liquidityPool;
     optionPricer = _optionPricer;
@@ -218,27 +141,7 @@ contract OptionMarket is Owned, SimpleInitializable, ReentrancyGuard {
     quoteAsset = _quoteAsset;
     baseAsset = _baseAsset;
   }
-
-  /////////////////////
-  // Admin functions //
-  /////////////////////
-
-  /**
-   * @notice Creates a new OptionBoard with defined strikePrices and initial skews.
-   *
-   * @param expiry The timestamp when the board expires.
-   * @param baseIV The initial value for baseIv (baseIv * skew = strike volatility).
-   * @param strikePrices The array of strikePrices offered for this expiry.
-   * @param skews The array of initial skews for each strikePrice.
-   * @param frozen Whether the board is frozen or not at creation.
-   */
-  function createOptionBoard(
-    uint expiry,
-    uint baseIV,
-    uint[] memory strikePrices,
-    uint[] memory skews,
-    bool frozen
-  ) external onlyOwner returns (uint boardId) {
+  function createOptionBoard(uint expiry, uint baseIV, uint[] memory strikePrices, uint[] memory skews, bool frozen) external onlyOwner returns (uint boardId) {
     uint strikePricesLength = strikePrices.length;
     // strikePrice and skew length must match and must have at least 1
     if (strikePricesLength != skews.length || strikePricesLength == 0) {
@@ -273,12 +176,6 @@ contract OptionMarket is Owned, SimpleInitializable, ReentrancyGuard {
 
     return boardId;
   }
-
-  /**
-   * @notice Sets the frozen state of an OptionBoard, preventing or allowing all trading on board.
-   * @param boardId The id of the OptionBoard.
-   * @param frozen Whether the board will be frozen or not.
-   */
   function setBoardFrozen(uint boardId, bool frozen) external onlyOwner {
     OptionBoard storage board = optionBoards[boardId];
     if (board.id != boardId || board.id == 0) {
