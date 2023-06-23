@@ -34,8 +34,7 @@ describe('OptionToken - AdjustingPositions', async () => {
     }
     expect((await hre.f.c.optionToken.getOwnerPositions(hre.f.deployer.address)).length).eq(0);
   });
-
-  it.only('test001 => ot', async () => {
+  it('test001 => ot', async () => {
     const ot = await hre.f.c.optionToken;
     const deployer = hre.f.deployer;
     let position: PositionWithOwnerStruct;
