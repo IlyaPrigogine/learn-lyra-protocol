@@ -354,7 +354,6 @@ describe('GMXAdapter', async () => {
     });
   });
 });
-
 describe('Successful Open v2', async () => {
   const collaterals = [toBN('0'), toBN('0'), toBN('1'), toBN('1500'), toBN('1500')];
 
