@@ -12,7 +12,7 @@ import { DEFAULT_BASE_PRICE, DEFAULT_GMX_ADAPTER_PARAMS, PricingType } from '../
 import { expect } from '../../utils/testSetup';
 import { setCLETHPrice } from '../../utils/seedTestSystemGMX';
 import { TestGMXVaultChainlinkPrice } from '../../../typechain-types';
-import { BigNumber } from 'ethers';
+import {BigNumber, constants} from 'ethers';
 import { hre } from '../../utils/testSetup';
 import {allCurrenciesFixtureGMX, seedFixture} from '../../utils/fixture';
 import {formatEther, parseEther} from "ethers/lib/utils";
@@ -125,7 +125,7 @@ describe('GMXAdapter', async () => {
     console.log(`${formatEther(x2)}`);
   });
 
-  it('estimates optionMarket', async () => {
+  it('test001', async () => {
     const om = hre.f.gc.optionMarket;
     const x2 = await hre.f.gc.GMXAdapter.estimateExchangeToExactBase(om.address, parseEther('2'));
     expect(x2).gt(parseEther("3589"))
@@ -367,12 +367,27 @@ describe('Successful Open v2', async () => {
   let oldUserQuoteBal: BigNumber;
   let oldUserBaseBal: BigNumber;
   let oldOMBalance: BigNumber;
+  let om : any;
+  let ga : any;
 
   beforeEach(async () => {
     await seedFixture();
     oldUserQuoteBal = await hre.f.c.snx.quoteAsset.balanceOf(hre.f.deployer.address);
     oldUserBaseBal = await hre.f.c.snx.baseAsset.balanceOf(hre.f.deployer.address);
     oldOMBalance = await hre.f.c.snx.quoteAsset.balanceOf(hre.f.c.optionMarket.address);
+
+    await allCurrenciesFixtureGMX();
+    await hre.f.gc.gmx.USDC.approve(hre.f.gc.GMXAdapter.address, MAX_UINT);
+    await hre.f.gc.gmx.btc.approve(hre.f.gc.GMXAdapter.address, MAX_UINT);
+    await hre.f.gc.gmx.eth.approve(hre.f.gc.GMXAdapter.address, MAX_UINT);
+
+    await hre.f.gc.GMXAdapter.setMarketPricingParams(hre.f.gc.optionMarket.address, {
+      ...DEFAULT_GMX_ADAPTER_PARAMS,
+      staticSwapFeeEstimate: toBN('1.01'),
+    });
+
+    om = hre.f.gc.optionMarket;
+    ga = await hre.f.gc.GMXAdapter;
   });
 
   async function op_1(_optionType: any, _amount: any) {
@@ -391,4 +406,9 @@ describe('Successful Open v2', async () => {
     await op_1(3, parseEther("1"));
     await op_1(4, parseEther("1"));
   });
+  it("test002", async() => {
+    console.log(`${await om.getOptionMarketParams()}`);
+    await op_1(0, parseEther("1"));
+    console.log(`${await om.getOptionMarketParams()}`);
+  })
 });
