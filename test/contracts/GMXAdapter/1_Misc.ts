@@ -430,4 +430,12 @@ describe('Successful Open v2', async () => {
 
     console.log(`${await ga.getAdapterState(om.address)}`);
   });
+
+  it('test005 => ', async () => {
+    const ot = hre.f.c.optionToken;
+    console.log(`${await ot.positions(0)}`);
+
+    await op_1(0, parseEther("1"));
+    console.log(`${await ot.positions(0)}`);
+  });
 });

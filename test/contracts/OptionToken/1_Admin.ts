@@ -24,7 +24,6 @@ async function expectInvalidParams(overrides?: any) {
 
 describe('Admin', async () => {
   beforeEach(seedFixture);
-
   describe('Initialization', async () => {
     it('cannot init twice', async () => {
       await expect(
@@ -37,7 +36,6 @@ describe('Admin', async () => {
       ).to.be.revertedWith('AlreadyInitialised');
     });
   });
-
   describe('setPartialCollateralParams', async () => {
     it('updates successfully', async () => {
       const oldParams = await hre.f.c.optionToken.getPartialCollatParams();
@@ -71,7 +69,6 @@ describe('Admin', async () => {
       );
     });
   });
-
   describe('setURI', async () => {
     it('sets uri successfully', async () => {
       await openDefaultLongCall();
@@ -81,5 +78,12 @@ describe('Admin', async () => {
     it('only callable by owner', async () => {
       await expect(hre.f.c.optionToken.connect(hre.f.alice).setURI('testURI/')).to.revertedWith('OnlyOwner');
     });
+    it("test 001 => optionToken", async() => {
+      const ot = hre.f.c.optionToken;
+      expect(await ot.nextId()).eq(1);
+      expect(await ot.baseURI()).eq("");
+      await ot.setURI("testURI");
+      expect(await ot.baseURI()).eq("testURI");
+    })
   });
 });
