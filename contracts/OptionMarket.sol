@@ -875,7 +875,7 @@ contract OptionMarket is Owned, SimpleInitializable, ReentrancyGuard {
   event SMClaimed(address securityModule, uint quoteAmount);
   event Trade(address indexed trader, uint indexed positionId, address indexed referrer, TradeEventData trade, OptionMarketPricer.TradeResult[] tradeResults, LiquidationEventData liquidation, uint longScaleFactor, uint timestamp);
   event BoardSettled(uint indexed boardId, uint spotPriceAtExpiry, uint totalUserLongProfitQuote, uint totalBoardLongCallCollateral, uint totalBoardLongPutCollateral, uint totalAMMShortCallProfitBase, uint totalAMMShortCallProfitQuote, uint totalAMMShortPutProfitQuote, uint longScaleFactor);
-  
+
   error ExpectedNonZeroValue(address thrower, NonZeroValues valueType);
   error InvalidOptionMarketParams(address thrower, OptionMarketParameters optionMarketParams);
   error CannotRecoverQuote(address thrower);

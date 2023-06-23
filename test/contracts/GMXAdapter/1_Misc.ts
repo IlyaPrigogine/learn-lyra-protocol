@@ -375,13 +375,20 @@ describe('Successful Open v2', async () => {
     oldOMBalance = await hre.f.c.snx.quoteAsset.balanceOf(hre.f.c.optionMarket.address);
   });
 
-  const optionType = 0;
-  it('test1', async () => {
-    const [tx, pos] = await openPosition({
-      amount: parseEther("1"),
+  async function op_1(_optionType: any, _amount: any) {
+    await openPosition({
+      optionType: _optionType,
+      amount: _amount,
+      setCollateralTo: collaterals[_optionType],
       iterations: 3,
-      optionType,
-      setCollateralTo: collaterals[optionType],
     });
+  }
+
+  it('test1', async () => {
+    await op_1(0, parseEther("1"));
+    await op_1(1, parseEther("1"));
+    await op_1(2, parseEther("1"));
+    await op_1(3, parseEther("1"));
+    await op_1(4, parseEther("1"));
   });
 });
