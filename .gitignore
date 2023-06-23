@@ -17,3 +17,4 @@ coverage.json
 .env.private*
 yarn-error.log
 .vscode/
+.lib
