@@ -131,6 +131,7 @@ contract OptionMarket is Owned, SimpleInitializable, ReentrancyGuard {
   mapping(uint => uint) public scaledLongsForBoard;
   constructor() Owned() {}
 
+  // settings
   function init(BaseExchangeAdapter _exchangeAdapter, LiquidityPool _liquidityPool, OptionMarketPricer _optionPricer, OptionGreekCache _greekCache, ShortCollateral _shortCollateral, OptionToken _optionToken, IERC20Decimals _quoteAsset, IERC20Decimals _baseAsset) external onlyOwner initializer {
     exchangeAdapter = _exchangeAdapter;
     liquidityPool = _liquidityPool;
@@ -184,13 +185,6 @@ contract OptionMarket is Owned, SimpleInitializable, ReentrancyGuard {
     optionBoards[boardId].frozen = frozen;
     emit BoardFrozen(boardId, frozen);
   }
-
-  /**
-   * @notice Sets the baseIv of a frozen OptionBoard.
-   *
-   * @param boardId The id of the OptionBoard.
-   * @param baseIv The new baseIv value.
-   */
   function setBoardBaseIv(uint boardId, uint baseIv) external onlyOwner {
     OptionBoard storage board = optionBoards[boardId];
     if (board.id != boardId || board.id == 0) {
@@ -207,13 +201,6 @@ contract OptionMarket is Owned, SimpleInitializable, ReentrancyGuard {
     greekCache.setBoardIv(boardId, baseIv);
     emit BoardBaseIvSet(boardId, baseIv);
   }
-
-  /**
-   * @notice Sets the skew of a Strike of a frozen OptionBoard.
-   *
-   * @param strikeId The id of the strike being modified.
-   * @param skew The new skew value.
-   */
   function setStrikeSkew(uint strikeId, uint skew) external onlyOwner {
     Strike storage strike = strikes[strikeId];
     if (strike.id != strikeId) {
@@ -232,14 +219,6 @@ contract OptionMarket is Owned, SimpleInitializable, ReentrancyGuard {
     greekCache.setStrikeSkew(strikeId, skew);
     emit StrikeSkewSet(strikeId, skew);
   }
-
-  /**
-   * @notice Add a strike to an existing board in the OptionMarket.
-   *
-   * @param boardId The id of the board which the strike will be added
-   * @param strikePrice The strike price of the strike being added
-   * @param skew Skew of the Strike
-   */
   function addStrikeToBoard(uint boardId, uint strikePrice, uint skew) external onlyOwner {
     OptionBoard storage board = optionBoards[boardId];
     if (board.id != boardId || board.id == 0) {
@@ -248,8 +227,6 @@ contract OptionMarket is Owned, SimpleInitializable, ReentrancyGuard {
     Strike memory strike = _addStrikeToBoard(board, strikePrice, skew);
     greekCache.addStrikeToBoard(boardId, strike.id, strikePrice, skew);
   }
-
-  /// @dev Add a strike to an existing board.
   function _addStrikeToBoard(OptionBoard storage board, uint strikePrice, uint skew) internal returns (Strike memory) {
     if (strikePrice == 0) {
       revert ExpectedNonZeroValue(address(this), NonZeroValues.STRIKE_PRICE);
@@ -264,13 +241,6 @@ contract OptionMarket is Owned, SimpleInitializable, ReentrancyGuard {
     emit StrikeAdded(board.id, strikeId, strikePrice, skew);
     return strikes[strikeId];
   }
-
-  /**
-   * @notice Force settle all open options before expiry.
-   * @dev Only used during emergency situations.
-   *
-   * @param boardId The id of the board to settle
-   */
   function forceSettleBoard(uint boardId) external onlyOwner {
     OptionBoard memory board = optionBoards[boardId];
     if (board.id != boardId || board.id == 0) {
@@ -281,8 +251,6 @@ contract OptionMarket is Owned, SimpleInitializable, ReentrancyGuard {
     }
     _clearAndSettleBoard(board);
   }
-
-  /// @notice set OptionMarketParams
   function setOptionMarketParams(OptionMarketParameters memory _optionMarketParams) external onlyOwner {
     if (_optionMarketParams.feePortionReserved > DecimalMath.UNIT) {
       revert InvalidOptionMarketParams(address(this), _optionMarketParams);
@@ -290,8 +258,6 @@ contract OptionMarket is Owned, SimpleInitializable, ReentrancyGuard {
     optionMarketParams = _optionMarketParams;
     emit OptionMarketParamsSet(optionMarketParams);
   }
-
-  /// @notice claim all reserved option fees
   function smClaim() external notGlobalPaused {
     if (msg.sender != optionMarketParams.securityModule) {
       revert OnlySecurityModule(address(this), msg.sender, optionMarketParams.securityModule);
@@ -302,26 +268,16 @@ contract OptionMarket is Owned, SimpleInitializable, ReentrancyGuard {
     }
     emit SMClaimed(msg.sender, quoteBal);
   }
-
-  /// @notice Allow incorrectly sent funds to be recovered
   function recoverFunds(IERC20Decimals token, address recipient) external onlyOwner {
     if (token == quoteAsset) {
       revert CannotRecoverQuote(address(this));
     }
     token.transfer(recipient, token.balanceOf(address(this)));
   }
-
-  ///////////
-  // Views //
-  ///////////
-
+  // views
   function getOptionMarketParams() external view returns (OptionMarketParameters memory) {
     return optionMarketParams;
   }
-
-  /**
-   * @notice Returns the list of live board ids.
-   */
   function getLiveBoards() external view returns (uint[] memory _liveBoards) {
     uint liveBoardsLen = liveBoards.length;
     _liveBoards = new uint[](liveBoardsLen);
@@ -330,22 +286,12 @@ contract OptionMarket is Owned, SimpleInitializable, ReentrancyGuard {
     }
     return _liveBoards;
   }
-
-  /// @notice Returns the number of current live boards
   function getNumLiveBoards() external view returns (uint numLiveBoards) {
     return liveBoards.length;
   }
-
-  /// @notice Returns the strike and expiry for a given strikeId
   function getStrikeAndExpiry(uint strikeId) external view returns (uint strikePrice, uint expiry) {
     return (strikes[strikeId].strikePrice, optionBoards[strikes[strikeId].boardId].expiry);
   }
-
-  /**
-   * @notice Returns the strike ids for a given `boardId`.
-   *
-   * @param boardId The id of the relevant OptionBoard.
-   */
   function getBoardStrikes(uint boardId) external view returns (uint[] memory strikeIds) {
     uint strikeIdsLen = optionBoards[boardId].strikeIds.length;
     strikeIds = new uint[](strikeIdsLen);
@@ -354,35 +300,17 @@ contract OptionMarket is Owned, SimpleInitializable, ReentrancyGuard {
     }
     return strikeIds;
   }
-
-  /// @notice Returns the Strike struct for a given strikeId
   function getStrike(uint strikeId) external view returns (Strike memory) {
     return strikes[strikeId];
   }
-
-  /// @notice Returns the OptionBoard struct for a given boardId
   function getOptionBoard(uint boardId) external view returns (OptionBoard memory) {
     return optionBoards[boardId];
   }
-
-  /// @notice Returns the Strike and OptionBoard structs for a given strikeId
   function getStrikeAndBoard(uint strikeId) external view returns (Strike memory, OptionBoard memory) {
     Strike memory strike = strikes[strikeId];
     return (strike, optionBoards[strike.boardId]);
   }
-
-  /**
-   * @notice Returns board and strike details given a boardId
-   *
-   * @return board
-   * @return boardStrikes
-   * @return strikeToBaseReturnedRatios For each strike, the ratio of full base collateral to return to the trader
-   * @return priceAtExpiry
-   * @return longScaleFactor The amount to scale payouts for long options
-   */
-  function getBoardAndStrikeDetails(
-    uint boardId
-  ) external view returns (OptionBoard memory, Strike[] memory, uint[] memory, uint, uint) {
+  function getBoardAndStrikeDetails(uint boardId) external view returns (OptionBoard memory, Strike[] memory, uint[] memory, uint, uint) {
     OptionBoard memory board = optionBoards[boardId];
 
     uint strikesLen = board.strikeIds.length;
@@ -400,324 +328,24 @@ contract OptionMarket is Owned, SimpleInitializable, ReentrancyGuard {
       scaledLongsForBoard[boardId]
     );
   }
-
-  ////////////////////
-  // User functions //
-  ////////////////////
-
-  /**
-   * @notice Attempts to open positions within cost bounds.
-   * @dev If a positionId is specified that position is adjusted accordingly
-   *
-   * @param params The parameters for the requested trade
-   */
+  // user func
   function openPosition(TradeInputParameters memory params) external nonReentrant returns (Result memory result) {
     result = _openPosition(params);
     _checkCostInBounds(result.totalCost, params.minTotalCost, params.maxTotalCost);
   }
-
-  /**
-   * @notice Attempts to reduce or fully close position within cost bounds.
-   *
-   * @param params The parameters for the requested trade
-   */
   function closePosition(TradeInputParameters memory params) external nonReentrant returns (Result memory result) {
     result = _closePosition(params, false);
     _checkCostInBounds(result.totalCost, params.minTotalCost, params.maxTotalCost);
   }
-
-  /**
-   * @notice Attempts to reduce or fully close position within cost bounds while ignoring delta trading cutoffs.
-   *
-   * @param params The parameters for the requested trade
-   */
   function forceClosePosition(TradeInputParameters memory params) external nonReentrant returns (Result memory result) {
     result = _closePosition(params, true);
     _checkCostInBounds(result.totalCost, params.minTotalCost, params.maxTotalCost);
   }
-
-  /**
-   * @notice Add collateral of size amountCollateral onto a short position (long or call) specified by positionId;
-   *         this transfers tokens (which may be denominated in the quote or the base asset). This allows you to
-   *         further collateralise a short position in order to, say, prevent imminent liquidation.
-   *
-   * @param positionId id of OptionToken to add collateral to
-   * @param amountCollateral the amount of collateral to be added
-   */
   function addCollateral(uint positionId, uint amountCollateral) external nonReentrant notGlobalPaused {
     int pendingCollateral = SafeCast.toInt256(amountCollateral);
     OptionType optionType = optionToken.addCollateral(positionId, amountCollateral);
     _routeUserCollateral(optionType, pendingCollateral);
   }
-
-  function _checkCostInBounds(uint totalCost, uint minCost, uint maxCost) internal view {
-    if (totalCost < minCost || totalCost > maxCost) {
-      revert TotalCostOutsideOfSpecifiedBounds(address(this), totalCost, minCost, maxCost);
-    }
-  }
-
-  /////////////////////////
-  // Opening and Closing //
-  /////////////////////////
-
-  /**
-   * @dev Opens a position, which may be long call, long put, short call or short put.
-   */
-  function _openPosition(TradeInputParameters memory params) internal returns (Result memory result) {
-    (TradeParameters memory trade, Strike storage strike, OptionBoard storage board) = _composeTrade(
-      params.strikeId,
-      params.optionType,
-      params.amount,
-      TradeDirection.OPEN,
-      params.iterations,
-      false
-    );
-    OptionMarketPricer.TradeResult[] memory tradeResults;
-    (trade.amount, result.totalCost, result.totalFee, tradeResults) = _doTrade(
-      strike,
-      board,
-      trade,
-      params.iterations,
-      params.amount
-    );
-
-    int pendingCollateral;
-    // collateral logic happens within optionToken
-    (result.positionId, pendingCollateral) = optionToken.adjustPosition(
-      trade,
-      params.strikeId,
-      msg.sender,
-      params.positionId,
-      result.totalCost,
-      params.setCollateralTo,
-      true
-    );
-
-    uint reservedFee = result.totalFee.multiplyDecimal(optionMarketParams.feePortionReserved);
-
-    _routeLPFundsOnOpen(trade, result.totalCost, reservedFee, params.strikeId);
-    _routeUserCollateral(trade.optionType, pendingCollateral);
-    liquidityPool.updateCBs();
-
-    emit Trade(
-      msg.sender,
-      result.positionId,
-      params.referrer,
-      TradeEventData({
-        strikeId: params.strikeId,
-        expiry: trade.expiry,
-        strikePrice: trade.strikePrice,
-        optionType: params.optionType,
-        tradeDirection: TradeDirection.OPEN,
-        amount: trade.amount,
-        setCollateralTo: params.setCollateralTo,
-        isForceClose: false,
-        spotPrice: trade.spotPrice,
-        reservedFee: reservedFee,
-        totalCost: result.totalCost
-      }),
-      tradeResults,
-      LiquidationEventData(address(0), address(0), 0, 0, 0, 0, 0, 0),
-      trade.liquidity.longScaleFactor,
-      block.timestamp
-    );
-  }
-
-  /**
-   * @dev Closes some amount of an open position. The user does not have to close the whole position.
-   *
-   */
-  function _closePosition(TradeInputParameters memory params, bool forceClose) internal returns (Result memory result) {
-    (TradeParameters memory trade, Strike storage strike, OptionBoard storage board) = _composeTrade(
-      params.strikeId,
-      params.optionType,
-      params.amount,
-      TradeDirection.CLOSE,
-      params.iterations,
-      forceClose
-    );
-
-    OptionMarketPricer.TradeResult[] memory tradeResults;
-    (trade.amount, result.totalCost, result.totalFee, tradeResults) = _doTrade(
-      strike,
-      board,
-      trade,
-      params.iterations,
-      params.amount
-    );
-
-    int pendingCollateral;
-    // collateral logic happens within optionToken
-    (result.positionId, pendingCollateral) = optionToken.adjustPosition(
-      trade,
-      params.strikeId,
-      msg.sender,
-      params.positionId,
-      result.totalCost,
-      params.setCollateralTo,
-      false
-    );
-
-    uint reservedFee = result.totalFee.multiplyDecimal(optionMarketParams.feePortionReserved);
-
-    _routeUserCollateral(trade.optionType, pendingCollateral);
-    _routeLPFundsOnClose(trade, result.totalCost, reservedFee);
-    liquidityPool.updateCBs();
-
-    emit Trade(
-      msg.sender,
-      result.positionId,
-      params.referrer,
-      TradeEventData({
-        strikeId: params.strikeId,
-        expiry: trade.expiry,
-        strikePrice: trade.strikePrice,
-        optionType: params.optionType,
-        tradeDirection: TradeDirection.CLOSE,
-        amount: params.amount,
-        setCollateralTo: params.setCollateralTo,
-        isForceClose: forceClose,
-        reservedFee: reservedFee,
-        spotPrice: trade.spotPrice,
-        totalCost: result.totalCost
-      }),
-      tradeResults,
-      LiquidationEventData(address(0), address(0), 0, 0, 0, 0, 0, 0),
-      trade.liquidity.longScaleFactor,
-      block.timestamp
-    );
-  }
-
-  /**
-   * @dev Compile all trade related details
-   */
-  function _composeTrade(
-    uint strikeId,
-    OptionType optionType,
-    uint amount,
-    TradeDirection _tradeDirection,
-    uint iterations,
-    bool isForceClose
-  ) internal view returns (TradeParameters memory trade, Strike storage strike, OptionBoard storage board) {
-    if (strikeId == 0) {
-      revert ExpectedNonZeroValue(address(this), NonZeroValues.STRIKE_ID);
-    }
-    if (iterations == 0) {
-      revert ExpectedNonZeroValue(address(this), NonZeroValues.ITERATIONS);
-    }
-
-    strike = strikes[strikeId];
-    if (strike.id != strikeId) {
-      revert InvalidStrikeId(address(this), strikeId);
-    }
-    board = optionBoards[strike.boardId];
-
-    if (boardToPriceAtExpiry[board.id] != 0) {
-      revert BoardAlreadySettled(address(this), board.id);
-    }
-
-    bool isBuy = (_tradeDirection == TradeDirection.OPEN) ? _isLong(optionType) : !_isLong(optionType);
-
-    BaseExchangeAdapter.PriceType pricing;
-    if (_tradeDirection == TradeDirection.LIQUIDATE) {
-      pricing = BaseExchangeAdapter.PriceType.REFERENCE;
-    } else if (optionType == OptionType.LONG_CALL || optionType == OptionType.SHORT_PUT_QUOTE) {
-      pricing = _tradeDirection == TradeDirection.OPEN
-        ? BaseExchangeAdapter.PriceType.MAX_PRICE
-        : (isForceClose ? BaseExchangeAdapter.PriceType.FORCE_MIN : BaseExchangeAdapter.PriceType.MIN_PRICE);
-    } else {
-      pricing = _tradeDirection == TradeDirection.OPEN
-        ? BaseExchangeAdapter.PriceType.MIN_PRICE
-        : (isForceClose ? BaseExchangeAdapter.PriceType.FORCE_MAX : BaseExchangeAdapter.PriceType.MAX_PRICE);
-    }
-
-    trade = TradeParameters({
-      isBuy: isBuy,
-      isForceClose: isForceClose,
-      tradeDirection: _tradeDirection,
-      optionType: optionType,
-      amount: amount / iterations,
-      expiry: board.expiry,
-      strikePrice: strike.strikePrice,
-      liquidity: liquidityPool.getLiquidity(), // NOTE: uses PriceType.REFERENCE
-      spotPrice: exchangeAdapter.getSpotPriceForMarket(address(this), pricing)
-    });
-  }
-
-  function _isLong(OptionType optionType) internal pure returns (bool) {
-    return (optionType == OptionType.LONG_CALL || optionType == OptionType.LONG_PUT);
-  }
-
-  /**
-   * @dev Determine the cost of the trade and update the system's iv/skew/exposure parameters.
-   *
-   * @param strike The currently traded Strike.
-   * @param board The currently traded OptionBoard.
-   * @param trade The trade parameters struct, informing the trade the caller wants to make.
-   */
-  function _doTrade(
-    Strike storage strike,
-    OptionBoard storage board,
-    TradeParameters memory trade,
-    uint iterations,
-    uint expectedAmount
-  )
-    internal
-    returns (uint totalAmount, uint totalCost, uint totalFee, OptionMarketPricer.TradeResult[] memory tradeResults)
-  {
-    // don't engage AMM if only collateral is added/removed
-    if (trade.amount == 0) {
-      if (expectedAmount != 0) {
-        revert TradeIterationsHasRemainder(address(this), iterations, expectedAmount, 0, 0);
-      }
-      return (0, 0, 0, new OptionMarketPricer.TradeResult[](0));
-    }
-
-    if (board.frozen) {
-      revert BoardIsFrozen(address(this), board.id);
-    }
-    if (block.timestamp >= board.expiry) {
-      revert BoardExpired(address(this), board.id, board.expiry, block.timestamp);
-    }
-
-    tradeResults = new OptionMarketPricer.TradeResult[](iterations);
-
-    for (uint i = 0; i < iterations; ++i) {
-      if (i == iterations - 1) {
-        trade.amount = expectedAmount - totalAmount;
-      }
-      _updateExposure(trade.amount, trade.optionType, strike, trade.tradeDirection == TradeDirection.OPEN);
-
-      OptionMarketPricer.TradeResult memory tradeResult = optionPricer.updateCacheAndGetTradeResult(
-        strike,
-        trade,
-        board.iv,
-        board.expiry
-      );
-
-      board.iv = tradeResult.newBaseIv;
-      strike.skew = tradeResult.newSkew;
-
-      totalCost += tradeResult.totalCost;
-      totalFee += tradeResult.totalFee;
-      totalAmount += trade.amount;
-
-      tradeResults[i] = tradeResult;
-    }
-
-    return (totalAmount, totalCost, totalFee, tradeResults);
-  }
-
-  /////////////////
-  // Liquidation //
-  /////////////////
-
-  /**
-   * @dev Allows anyone to liquidate an underwater position
-   *
-   * @param positionId the position to be liquidated
-   * @param rewardBeneficiary the address to receive the liquidator fee in either quote or base
-   */
   function liquidatePosition(uint positionId, address rewardBeneficiary) external nonReentrant {
     OptionToken.PositionWithOwner memory position = optionToken.getPositionWithOwner(positionId);
 
@@ -780,12 +408,221 @@ contract OptionMarket is Owned, SimpleInitializable, ReentrancyGuard {
       block.timestamp
     );
   }
+  function _checkCostInBounds(uint totalCost, uint minCost, uint maxCost) internal view {
+    if (totalCost < minCost || totalCost > maxCost) {
+      revert TotalCostOutsideOfSpecifiedBounds(address(this), totalCost, minCost, maxCost);
+    }
+  }
+  // internals
+  function _openPosition(TradeInputParameters memory params) internal returns (Result memory result) {
+    (TradeParameters memory trade, Strike storage strike, OptionBoard storage board) = _composeTrade(
+      params.strikeId,
+      params.optionType,
+      params.amount,
+      TradeDirection.OPEN,
+      params.iterations,
+      false
+    );
+    OptionMarketPricer.TradeResult[] memory tradeResults;
+    (trade.amount, result.totalCost, result.totalFee, tradeResults) = _doTrade(
+      strike,
+      board,
+      trade,
+      params.iterations,
+      params.amount
+    );
 
-  //////////////////
-  // Fund routing //
-  //////////////////
+    int pendingCollateral;
+    // collateral logic happens within optionToken
+    (result.positionId, pendingCollateral) = optionToken.adjustPosition(
+      trade,
+      params.strikeId,
+      msg.sender,
+      params.positionId,
+      result.totalCost,
+      params.setCollateralTo,
+      true
+    );
 
-  /// @dev send/receive quote or base to/from LiquidityPool on position open
+    uint reservedFee = result.totalFee.multiplyDecimal(optionMarketParams.feePortionReserved);
+
+    _routeLPFundsOnOpen(trade, result.totalCost, reservedFee, params.strikeId);
+    _routeUserCollateral(trade.optionType, pendingCollateral);
+    liquidityPool.updateCBs();
+
+    emit Trade(
+      msg.sender,
+      result.positionId,
+      params.referrer,
+      TradeEventData({
+        strikeId: params.strikeId,
+        expiry: trade.expiry,
+        strikePrice: trade.strikePrice,
+        optionType: params.optionType,
+        tradeDirection: TradeDirection.OPEN,
+        amount: trade.amount,
+        setCollateralTo: params.setCollateralTo,
+        isForceClose: false,
+        spotPrice: trade.spotPrice,
+        reservedFee: reservedFee,
+        totalCost: result.totalCost
+      }),
+      tradeResults,
+      LiquidationEventData(address(0), address(0), 0, 0, 0, 0, 0, 0),
+      trade.liquidity.longScaleFactor,
+      block.timestamp
+    );
+  }
+  function _closePosition(TradeInputParameters memory params, bool forceClose) internal returns (Result memory result) {
+    (TradeParameters memory trade, Strike storage strike, OptionBoard storage board) = _composeTrade(
+      params.strikeId,
+      params.optionType,
+      params.amount,
+      TradeDirection.CLOSE,
+      params.iterations,
+      forceClose
+    );
+
+    OptionMarketPricer.TradeResult[] memory tradeResults;
+    (trade.amount, result.totalCost, result.totalFee, tradeResults) = _doTrade(
+      strike,
+      board,
+      trade,
+      params.iterations,
+      params.amount
+    );
+
+    int pendingCollateral;
+    // collateral logic happens within optionToken
+    (result.positionId, pendingCollateral) = optionToken.adjustPosition(
+      trade,
+      params.strikeId,
+      msg.sender,
+      params.positionId,
+      result.totalCost,
+      params.setCollateralTo,
+      false
+    );
+
+    uint reservedFee = result.totalFee.multiplyDecimal(optionMarketParams.feePortionReserved);
+
+    _routeUserCollateral(trade.optionType, pendingCollateral);
+    _routeLPFundsOnClose(trade, result.totalCost, reservedFee);
+    liquidityPool.updateCBs();
+
+    emit Trade(
+      msg.sender,
+      result.positionId,
+      params.referrer,
+      TradeEventData({
+        strikeId: params.strikeId,
+        expiry: trade.expiry,
+        strikePrice: trade.strikePrice,
+        optionType: params.optionType,
+        tradeDirection: TradeDirection.CLOSE,
+        amount: params.amount,
+        setCollateralTo: params.setCollateralTo,
+        isForceClose: forceClose,
+        reservedFee: reservedFee,
+        spotPrice: trade.spotPrice,
+        totalCost: result.totalCost
+      }),
+      tradeResults,
+      LiquidationEventData(address(0), address(0), 0, 0, 0, 0, 0, 0),
+      trade.liquidity.longScaleFactor,
+      block.timestamp
+    );
+  }
+  function _composeTrade(uint strikeId, OptionType optionType, uint amount, TradeDirection _tradeDirection, uint iterations, bool isForceClose) internal view returns (TradeParameters memory trade, Strike storage strike, OptionBoard storage board) {
+    if (strikeId == 0) {
+      revert ExpectedNonZeroValue(address(this), NonZeroValues.STRIKE_ID);
+    }
+    if (iterations == 0) {
+      revert ExpectedNonZeroValue(address(this), NonZeroValues.ITERATIONS);
+    }
+
+    strike = strikes[strikeId];
+    if (strike.id != strikeId) {
+      revert InvalidStrikeId(address(this), strikeId);
+    }
+    board = optionBoards[strike.boardId];
+
+    if (boardToPriceAtExpiry[board.id] != 0) {
+      revert BoardAlreadySettled(address(this), board.id);
+    }
+
+    bool isBuy = (_tradeDirection == TradeDirection.OPEN) ? _isLong(optionType) : !_isLong(optionType);
+
+    BaseExchangeAdapter.PriceType pricing;
+    if (_tradeDirection == TradeDirection.LIQUIDATE) {
+      pricing = BaseExchangeAdapter.PriceType.REFERENCE;
+    } else if (optionType == OptionType.LONG_CALL || optionType == OptionType.SHORT_PUT_QUOTE) {
+      pricing = _tradeDirection == TradeDirection.OPEN
+        ? BaseExchangeAdapter.PriceType.MAX_PRICE
+        : (isForceClose ? BaseExchangeAdapter.PriceType.FORCE_MIN : BaseExchangeAdapter.PriceType.MIN_PRICE);
+    } else {
+      pricing = _tradeDirection == TradeDirection.OPEN
+        ? BaseExchangeAdapter.PriceType.MIN_PRICE
+        : (isForceClose ? BaseExchangeAdapter.PriceType.FORCE_MAX : BaseExchangeAdapter.PriceType.MAX_PRICE);
+    }
+
+    trade = TradeParameters({
+      isBuy: isBuy,
+      isForceClose: isForceClose,
+      tradeDirection: _tradeDirection,
+      optionType: optionType,
+      amount: amount / iterations,
+      expiry: board.expiry,
+      strikePrice: strike.strikePrice,
+      liquidity: liquidityPool.getLiquidity(), // NOTE: uses PriceType.REFERENCE
+      spotPrice: exchangeAdapter.getSpotPriceForMarket(address(this), pricing)
+    });
+  }
+  function _isLong(OptionType optionType) internal pure returns (bool) {
+    return (optionType == OptionType.LONG_CALL || optionType == OptionType.LONG_PUT);
+  }
+  function _doTrade(Strike storage strike, OptionBoard storage board, TradeParameters memory trade, uint iterations, uint expectedAmount) internal returns (uint totalAmount, uint totalCost, uint totalFee, OptionMarketPricer.TradeResult[] memory tradeResults) {
+    if (trade.amount == 0) {
+      if (expectedAmount != 0) {
+        revert TradeIterationsHasRemainder(address(this), iterations, expectedAmount, 0, 0);
+      }
+      return (0, 0, 0, new OptionMarketPricer.TradeResult[](0));
+    }
+
+    if (board.frozen) {
+      revert BoardIsFrozen(address(this), board.id);
+    }
+    if (block.timestamp >= board.expiry) {
+      revert BoardExpired(address(this), board.id, board.expiry, block.timestamp);
+    }
+
+    tradeResults = new OptionMarketPricer.TradeResult[](iterations);
+
+    for (uint i = 0; i < iterations; ++i) {
+      if (i == iterations - 1) {
+        trade.amount = expectedAmount - totalAmount;
+      }
+      _updateExposure(trade.amount, trade.optionType, strike, trade.tradeDirection == TradeDirection.OPEN);
+
+      OptionMarketPricer.TradeResult memory tradeResult = optionPricer.updateCacheAndGetTradeResult(
+        strike,
+        trade,
+        board.iv,
+        board.expiry
+      );
+
+      board.iv = tradeResult.newBaseIv;
+      strike.skew = tradeResult.newSkew;
+
+      totalCost += tradeResult.totalCost;
+      totalFee += tradeResult.totalFee;
+      totalAmount += trade.amount;
+
+      tradeResults[i] = tradeResult;
+    }
+
+    return (totalAmount, totalCost, totalFee, tradeResults);
+  }
   function _routeLPFundsOnOpen(TradeParameters memory trade, uint totalCost, uint feePortion, uint strikeId) internal {
     if (trade.amount == 0) {
       return;
@@ -826,8 +663,6 @@ contract OptionMarket is Owned, SimpleInitializable, ReentrancyGuard {
       );
     }
   }
-
-  /// @dev send/receive quote or base to/from LiquidityPool on position close
   function _routeLPFundsOnClose(TradeParameters memory trade, uint totalCost, uint reservedFee) internal {
     if (trade.amount == 0) {
       return;
@@ -858,8 +693,6 @@ contract OptionMarket is Owned, SimpleInitializable, ReentrancyGuard {
       shortCollateral.sendQuoteCollateral(address(this), reservedFee);
     }
   }
-
-  /// @dev route collateral to/from msg.sender when short positions are adjusted
   function _routeUserCollateral(OptionType optionType, int pendingCollateral) internal {
     if (pendingCollateral == 0) {
       return;
@@ -894,8 +727,6 @@ contract OptionMarket is Owned, SimpleInitializable, ReentrancyGuard {
       }
     }
   }
-
-  /// @dev update all exposures per strike and optionType
   function _updateExposure(uint amount, OptionType optionType, Strike storage strike, bool isOpen) internal {
     int exposure = isOpen ? SafeCast.toInt256(amount) : -SafeCast.toInt256(amount);
 
