@@ -429,6 +429,5 @@ describe('Successful Open v2', async () => {
     expect(await ga.estimateExchangeToExactBase(om.address, _amount)).lt(parseEther("1795"));
 
     console.log(`${await ga.getAdapterState(om.address)}`);
-    const x = await ga.getAdapterState(om.address);
   });
 });
