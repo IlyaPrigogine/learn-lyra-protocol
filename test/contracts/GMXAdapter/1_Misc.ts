@@ -411,7 +411,7 @@ describe('Successful Open v2', async () => {
     console.log(`${await om.getOptionMarketParams()}`);
     expect(await ga.isGlobalPaused()).false;
   });
-  it("test003", async() => {
+  it("test003 => baseExchangeAdapter", async() => {
     console.log(`${await ga.requireNotGlobalPaused(om.address)}`);
     console.log(`${await ga.requireNotMarketPaused(om.address)}`)
     console.log(`${formatEther(await ga.rateAndCarry(om.address))}`);
@@ -419,5 +419,16 @@ describe('Successful Open v2', async () => {
     console.log(`${formatEther(await ga.getSettlementPriceForMarket(om.address,0))}`);
     console.log(`${formatEther(await ga.estimateExchangeToExactQuote(om.address, DEFAULT_BASE_PRICE))}`);
     console.log(`${formatEther(await ga.estimateExchangeToExactBase(om.address, parseEther('1.0')))}`);
+  });
+  it("test004 => GMXAdapter", async() => {
+    expect(await ga.getSpotPriceForMarket(om.address,0)).eq(parseEther("1724.5932363"));
+    expect(await ga.getSettlementPriceForMarket(om.address,0)).eq(parseEther("1742.01337"));
+    expect(await ga.estimateExchangeToExactQuote(om.address, DEFAULT_BASE_PRICE)).gt(parseEther("1.03"));
+    const _amount = parseEther("1.0");
+    expect(await ga.estimateExchangeToExactBase(om.address, _amount)).gt(parseEther("1794"));
+    expect(await ga.estimateExchangeToExactBase(om.address, _amount)).lt(parseEther("1795"));
+
+    console.log(`${await ga.getAdapterState(om.address)}`);
+    const x = await ga.getAdapterState(om.address);
   });
 });
