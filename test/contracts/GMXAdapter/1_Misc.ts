@@ -7,6 +7,7 @@ import { TestGMXVaultChainlinkPrice } from '../../../typechain-types';
 import { BigNumber } from 'ethers';
 import { hre } from '../../utils/testSetup';
 import { allCurrenciesFixtureGMX } from '../../utils/fixture';
+import {formatEther, parseEther} from "ethers/lib/utils";
 
 describe('GMXAdapter', async () => {
   beforeEach(async () => {
@@ -91,11 +92,17 @@ describe('GMXAdapter', async () => {
       hre.f.gc.optionMarket.address,
       toBN('1'),
     );
-    const om = hre.f.gc.optionMarket.address;
-    console.log(`${om} `);
-    console.log(`${toBN('1')}`);
+
     expect(estimatedQuoteAmt).gt(DEFAULT_BASE_PRICE);
     expect(estimatedQuoteAmt).lt(DEFAULT_BASE_PRICE.mul(105).div(100));
+
+    const om = hre.f.gc.optionMarket.address;
+    const x = await hre.f.gc.GMXAdapter.estimateExchangeToExactBase(
+        om,parseEther('1')
+    );
+    // console.log(`${formatEther(x)}`);
+    expect(x).gt(parseEther('1794'));
+    expect(x).lt(parseEther('1795'));
   });
 
   it('exchanges for base', async () => {
