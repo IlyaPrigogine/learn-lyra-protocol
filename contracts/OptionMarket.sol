@@ -749,18 +749,6 @@ contract OptionMarket is Owned, SimpleInitializable, ReentrancyGuard {
     }
   }
 
-  /////////////////////////////////
-  // Board Expiry and settlement //
-  /////////////////////////////////
-
-  /**
-   * @notice Settles an expired board.
-   * - Transfers all AMM profits for user shorts from ShortCollateral to LiquidityPool.
-   * - Reserves all user profits for user longs in LiquidityPool.
-   * - Records any profits that AMM did not receive due to user insolvencies
-   *
-   * @param boardId The relevant OptionBoard.
-   */
   function settleExpiredBoard(uint boardId) external nonReentrant {
     OptionBoard memory board = optionBoards[boardId];
     if (board.id != boardId || board.id == 0) {
@@ -771,7 +759,6 @@ contract OptionMarket is Owned, SimpleInitializable, ReentrancyGuard {
     }
     _clearAndSettleBoard(board);
   }
-
   function _clearAndSettleBoard(OptionBoard memory board) internal {
     bool popped = false;
     uint liveBoardsLen = liveBoards.length;
@@ -793,7 +780,6 @@ contract OptionMarket is Owned, SimpleInitializable, ReentrancyGuard {
     _settleExpiredBoard(board);
     greekCache.removeBoard(board.id);
   }
-
   function _settleExpiredBoard(OptionBoard memory board) internal {
     uint spotPrice = exchangeAdapter.getSettlementPriceForMarket(address(this), board.expiry);
 
@@ -861,11 +847,7 @@ contract OptionMarket is Owned, SimpleInitializable, ReentrancyGuard {
       longScaleFactor
     );
   }
-
-  /// @dev Returns the strike price, price at expiry, and profit ratio for user shorts post expiry
-  function getSettlementParameters(
-    uint strikeId
-  ) external view returns (uint strikePrice, uint priceAtExpiry, uint strikeToBaseReturned, uint longScaleFactor) {
+  function getSettlementParameters(uint strikeId) external view returns (uint strikePrice, uint priceAtExpiry, uint strikeToBaseReturned, uint longScaleFactor) {
     return (
       strikes[strikeId].strikePrice,
       boardToPriceAtExpiry[strikes[strikeId].boardId],
@@ -873,133 +855,42 @@ contract OptionMarket is Owned, SimpleInitializable, ReentrancyGuard {
       scaledLongsForBoard[strikes[strikeId].boardId]
     );
   }
-
-  //////////
-  // Misc //
-  //////////
-
-  /// @dev Transfers the amount from 18dp to the quoteAsset's decimals ensuring any precision loss is rounded up
   function _transferFromQuote(address from, address to, uint amount) internal {
     amount = ConvertDecimals.convertFrom18AndRoundUp(amount, quoteAsset.decimals());
     if (!quoteAsset.transferFrom(from, to, amount)) {
       revert QuoteTransferFailed(address(this), from, to, amount);
     }
   }
-
-  ///////////////
-  // Modifiers //
-  ///////////////
-
   modifier notGlobalPaused() {
     exchangeAdapter.requireNotGlobalPaused(address(this));
     _;
   }
 
-  ////////////
-  // Events //
-  ////////////
-
-  /**
-   * @dev Emitted when a Board is created.
-   */
   event BoardCreated(uint indexed boardId, uint expiry, uint baseIv, bool frozen);
-
-  /**
-   * @dev Emitted when a Board frozen is updated.
-   */
   event BoardFrozen(uint indexed boardId, bool frozen);
-
-  /**
-   * @dev Emitted when a Board new baseIv is set.
-   */
   event BoardBaseIvSet(uint indexed boardId, uint baseIv);
-
-  /**
-   * @dev Emitted when a Strike new skew is set.
-   */
   event StrikeSkewSet(uint indexed strikeId, uint skew);
-
-  /**
-   * @dev Emitted when a Strike is added to a board
-   */
   event StrikeAdded(uint indexed boardId, uint indexed strikeId, uint strikePrice, uint skew);
-
-  /**
-   * @dev Emitted when parameters for the option market are adjusted
-   */
   event OptionMarketParamsSet(OptionMarketParameters optionMarketParams);
-
-  /**
-   * @dev Emitted whenever the security module claims their portion of fees
-   */
   event SMClaimed(address securityModule, uint quoteAmount);
-
-  /**
-   * @dev Emitted when a Position is opened, closed or liquidated.
-   */
-  event Trade(
-    address indexed trader,
-    uint indexed positionId,
-    address indexed referrer,
-    TradeEventData trade,
-    OptionMarketPricer.TradeResult[] tradeResults,
-    LiquidationEventData liquidation,
-    uint longScaleFactor,
-    uint timestamp
-  );
-
-  /**
-   * @dev Emitted when a Board is liquidated.
-   */
-  event BoardSettled(
-    uint indexed boardId,
-    uint spotPriceAtExpiry,
-    uint totalUserLongProfitQuote,
-    uint totalBoardLongCallCollateral,
-    uint totalBoardLongPutCollateral,
-    uint totalAMMShortCallProfitBase,
-    uint totalAMMShortCallProfitQuote,
-    uint totalAMMShortPutProfitQuote,
-    uint longScaleFactor
-  );
-
-  ////////////
-  // Errors //
-  ////////////
-  // General purpose
+  event Trade(address indexed trader, uint indexed positionId, address indexed referrer, TradeEventData trade, OptionMarketPricer.TradeResult[] tradeResults, LiquidationEventData liquidation, uint longScaleFactor, uint timestamp);
+  event BoardSettled(uint indexed boardId, uint spotPriceAtExpiry, uint totalUserLongProfitQuote, uint totalBoardLongCallCollateral, uint totalBoardLongPutCollateral, uint totalAMMShortCallProfitBase, uint totalAMMShortCallProfitQuote, uint totalAMMShortPutProfitQuote, uint longScaleFactor);
+  
   error ExpectedNonZeroValue(address thrower, NonZeroValues valueType);
-
-  // Admin
   error InvalidOptionMarketParams(address thrower, OptionMarketParameters optionMarketParams);
   error CannotRecoverQuote(address thrower);
-
-  // Board related
   error InvalidBoardId(address thrower, uint boardId);
   error InvalidExpiryTimestamp(address thrower, uint currentTime, uint expiry, uint maxBoardExpiry);
   error BoardNotFrozen(address thrower, uint boardId);
   error BoardAlreadySettled(address thrower, uint boardId);
   error BoardNotExpired(address thrower, uint boardId);
-
-  // Strike related
   error InvalidStrikeId(address thrower, uint strikeId);
   error StrikeSkewLengthMismatch(address thrower, uint strikesLength, uint skewsLength);
-
-  // Trade
   error TotalCostOutsideOfSpecifiedBounds(address thrower, uint totalCost, uint minCost, uint maxCost);
   error BoardIsFrozen(address thrower, uint boardId);
   error BoardExpired(address thrower, uint boardId, uint boardExpiry, uint currentTime);
-  error TradeIterationsHasRemainder(
-    address thrower,
-    uint iterations,
-    uint expectedAmount,
-    uint tradeAmount,
-    uint totalAmount
-  );
-
-  // Access
+  error TradeIterationsHasRemainder(address thrower, uint iterations, uint expectedAmount, uint tradeAmount, uint totalAmount);
   error OnlySecurityModule(address thrower, address caller, address securityModule);
-
-  // Token transfers
   error BaseTransferFailed(address thrower, address from, address to, uint amount);
   error QuoteTransferFailed(address thrower, address from, address to, uint amount);
 }
