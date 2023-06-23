@@ -100,10 +100,23 @@ describe('GMXAdapter', async () => {
     const x = await hre.f.gc.GMXAdapter.estimateExchangeToExactBase(
         om,parseEther('1')
     );
-    // console.log(`${formatEther(x)}`);
     expect(x).gt(parseEther('1794'));
     expect(x).lt(parseEther('1795'));
+
+    const x2 = await hre.f.gc.GMXAdapter.estimateExchangeToExactBase(om, parseEther('2'));
+    console.log(`${formatEther(x2)}`);
   });
+
+  it('estimates optionMarket', async () => {
+    const om = hre.f.gc.optionMarket;
+    const x2 = await hre.f.gc.GMXAdapter.estimateExchangeToExactBase(om.address, parseEther('2'));
+    expect(x2).gt(parseEther("3589"))
+
+    console.log(`${await om.quoteAsset()}`);
+    console.log(`${await om.baseAsset()}`);
+  });
+
+
 
   it('exchanges for base', async () => {
     const preBaseBal = await hre.f.gc.gmx.eth.balanceOf(hre.f.deployer.address);
