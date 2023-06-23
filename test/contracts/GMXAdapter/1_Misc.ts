@@ -79,7 +79,7 @@ describe('GMXAdapter', async () => {
     expect(await hre.f.gc.GMXAdapter.getSettlementPriceForMarket(hre.f.gc.optionMarket.address, 0)).eq(newPrice);
   });
 
-  it.only('estimates exchange cost', async () => {
+  it('estimates exchange cost', async () => {
     const estimatedBaseAmt = await hre.f.gc.GMXAdapter.estimateExchangeToExactQuote(
       hre.f.gc.optionMarket.address,
       DEFAULT_BASE_PRICE,
@@ -91,6 +91,9 @@ describe('GMXAdapter', async () => {
       hre.f.gc.optionMarket.address,
       toBN('1'),
     );
+    const om = hre.f.gc.optionMarket.address;
+    console.log(`${om} `);
+    console.log(`${toBN('1')}`);
     expect(estimatedQuoteAmt).gt(DEFAULT_BASE_PRICE);
     expect(estimatedQuoteAmt).lt(DEFAULT_BASE_PRICE.mul(105).div(100));
   });
