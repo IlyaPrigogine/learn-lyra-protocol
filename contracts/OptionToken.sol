@@ -1,30 +1,19 @@
 //SPDX-License-Identifier: ISC
 pragma solidity 0.8.16;
-
-// Libraries
-import "./synthetix/DecimalMath.sol";
-import "./libraries/ConvertDecimals.sol";
 import "openzeppelin-contracts-4.4.1/utils/math/SafeCast.sol";
-
-// Inherited
 import "openzeppelin-contracts-4.4.1/token/ERC721/extensions/ERC721Enumerable.sol";
-import "./synthetix/Owned.sol";
-import "./libraries/SimpleInitializable.sol";
 import "openzeppelin-contracts-4.4.1/security/ReentrancyGuard.sol";
+import "./synthetix/DecimalMath.sol";
+import "./synthetix/Owned.sol";
+import "./libraries/ConvertDecimals.sol";
+import "./libraries/SimpleInitializable.sol";
 
-// Interfaces
 import "./OptionMarket.sol";
 import "./BaseExchangeAdapter.sol";
 import "./OptionGreekCache.sol";
 
-/**
- * @title OptionToken
- * @author Lyra
- * @dev Provides a tokenized representation of each trade position including amount of options and collateral.
- */
 contract OptionToken is Owned, SimpleInitializable, ReentrancyGuard, ERC721Enumerable {
   using DecimalMath for uint;
-
   enum PositionState {
     EMPTY,
     ACTIVE,
@@ -33,7 +22,6 @@ contract OptionToken is Owned, SimpleInitializable, ReentrancyGuard, ERC721Enume
     SETTLED,
     MERGED
   }
-
   enum PositionUpdatedType {
     OPENED,
     ADJUSTED,
@@ -46,7 +34,6 @@ contract OptionToken is Owned, SimpleInitializable, ReentrancyGuard, ERC721Enume
     LIQUIDATED,
     TRANSFER
   }
-
   struct OptionPosition {
     uint positionId;
     uint strikeId;
@@ -55,25 +42,12 @@ contract OptionToken is Owned, SimpleInitializable, ReentrancyGuard, ERC721Enume
     uint collateral;
     PositionState state;
   }
-
-  ///////////////
-  // Parameters //
-  ///////////////
-
   struct PartialCollateralParameters {
-    // Percent of collateral used for penalty (amm + sm + liquidator fees)
     uint penaltyRatio;
-    // Percent of penalty used for amm fees
     uint liquidatorFeeRatio;
-    // Percent of penalty used for SM fees
     uint smFeeRatio;
-    // Minimal value of quote that is used to charge a fee
     uint minLiquidationFee;
   }
-
-  ///////////////
-  // In-memory //
-  ///////////////
   struct PositionWithOwner {
     uint positionId;
     uint strikeId;
@@ -83,59 +57,46 @@ contract OptionToken is Owned, SimpleInitializable, ReentrancyGuard, ERC721Enume
     PositionState state;
     address owner;
   }
-
   struct LiquidationFees {
-    uint returnCollateral; // quote || base
-    uint lpPremiums; // quote || base
-    uint lpFee; // quote || base
-    uint liquidatorFee; // quote || base
-    uint smFee; // quote || base
-    uint insolventAmount; // quote
+    uint returnCollateral;
+    uint lpPremiums;
+    uint lpFee;
+    uint liquidatorFee;
+    uint smFee;
+    uint insolventAmount;
   }
-
-  ///////////////
-  // Variables //
-  ///////////////
   OptionMarket internal optionMarket;
   OptionGreekCache internal greekCache;
   address internal shortCollateral;
   BaseExchangeAdapter internal exchangeAdapter;
-
   mapping(uint => OptionPosition) public positions;
   uint public nextId = 1;
-
-  PartialCollateralParameters public partialCollatParams;
-
   string public baseURI;
-
-  ///////////
-  // Setup //
-  ///////////
-
+  PartialCollateralParameters public partialCollatParams;
+  modifier onlyOptionMarket() {
+    if (msg.sender != address(optionMarket)) {
+      revert OnlyOptionMarket(address(this), msg.sender, address(optionMarket));
+    }
+    _;
+  }
+  modifier onlyShortCollateral() {
+    if (msg.sender != address(shortCollateral)) {
+      revert OnlyShortCollateral(address(this), msg.sender, address(shortCollateral));
+    }
+    _;
+  }
+  modifier notGlobalPaused() {
+    exchangeAdapter.requireNotGlobalPaused(address(optionMarket));
+    _;
+  }
   constructor(string memory name_, string memory symbol_) ERC721(name_, symbol_) Owned() {}
-
-  /**
-   * @notice Initialise the contract.
-   *
-   * @param _optionMarket The OptionMarket contract address.
-   */
-  function init(
-    OptionMarket _optionMarket,
-    OptionGreekCache _greekCache,
-    address _shortCollateral,
-    BaseExchangeAdapter _exchangeAdapter
-  ) external onlyOwner initializer {
+  function init(OptionMarket _optionMarket, OptionGreekCache _greekCache, address _shortCollateral, BaseExchangeAdapter _exchangeAdapter) external onlyOwner initializer {
     optionMarket = _optionMarket;
     greekCache = _greekCache;
     shortCollateral = _shortCollateral;
     exchangeAdapter = _exchangeAdapter;
   }
-
-  ///////////
-  // Admin //
-  ///////////
-
-  /// @notice set PartialCollateralParameters
+  //  settings
   function setPartialCollateralParams(PartialCollateralParameters memory _partialCollatParams) external onlyOwner {
     if (
       _partialCollatParams.penaltyRatio > DecimalMath.UNIT ||
@@ -147,50 +108,15 @@ contract OptionToken is Owned, SimpleInitializable, ReentrancyGuard, ERC721Enume
     partialCollatParams = _partialCollatParams;
     emit PartialCollateralParamsSet(partialCollatParams);
   }
-
-  /**
-   * @param newURI The new uri definition for the contract.
-   */
   function setURI(string memory newURI) external onlyOwner {
     baseURI = newURI;
     emit URISet(baseURI);
   }
-
   function _baseURI() internal view override returns (string memory) {
     return baseURI;
   }
-
-  /////////////////////////
-  // Adjusting positions //
-  /////////////////////////
-
-  /**
-   * @notice Adjusts position amount and collateral when position is:
-   * - opened
-   * - closed
-   * - forceClosed
-   * - liquidated
-   *
-   * @param trade TradeParameters as defined in OptionMarket.
-   * @param strikeId id of strike for adjusted position.
-   * @param trader owner of position.
-   * @param positionId id of position.
-   * @param optionCost totalCost of closing or opening position.
-   * @param setCollateralTo final collateral to leave in position.
-   * @param isOpen whether order is to increase or decrease position.amount.
-   *
-   * @return uint positionId of position being adjusted (relevant for new positions)
-   * @return pendingCollateral amount of additional quote to receive from msg.sender
-   */
-  function adjustPosition(
-    OptionMarket.TradeParameters memory trade,
-    uint strikeId,
-    address trader,
-    uint positionId,
-    uint optionCost,
-    uint setCollateralTo,
-    bool isOpen
-  ) external onlyOptionMarket returns (uint, int pendingCollateral) {
+  // func
+  function adjustPosition(OptionMarket.TradeParameters memory trade, uint strikeId, address trader, uint positionId, uint optionCost, uint setCollateralTo, bool isOpen) external onlyOptionMarket returns (uint, int pendingCollateral) {
     OptionPosition storage position;
     bool newPosition = false;
     if (positionId == 0) {
@@ -288,19 +214,7 @@ contract OptionToken is Owned, SimpleInitializable, ReentrancyGuard, ERC721Enume
 
     return (position.positionId, pendingCollateral);
   }
-
-  /**
-   * @notice Only allows increase to position.collateral
-   *
-   * @param positionId id of position.
-   * @param amountCollateral amount of collateral to add to position.
-   *
-   * @return optionType OptionType of adjusted position
-   */
-  function addCollateral(
-    uint positionId,
-    uint amountCollateral
-  ) external onlyOptionMarket returns (OptionMarket.OptionType optionType) {
+  function addCollateral(uint positionId, uint amountCollateral) external onlyOptionMarket returns (OptionMarket.OptionType optionType) {
     OptionPosition storage position = positions[positionId];
 
     if (position.positionId == 0 || position.state != PositionState.ACTIVE || !_isShort(position.optionType)) {
@@ -327,13 +241,6 @@ contract OptionToken is Owned, SimpleInitializable, ReentrancyGuard, ERC721Enume
 
     return position.optionType;
   }
-
-  /**
-   * @notice burns and updates position.state when board is settled
-   * @dev invalid positions get caught when trying to query owner for event (or in burn)
-   *
-   * @param positionIds array of position ids to settle
-   */
   function settlePositions(uint[] memory positionIds) external onlyShortCollateral {
     uint positionsLength = positionIds.length;
     for (uint i = 0; i < positionsLength; ++i) {
@@ -350,24 +257,7 @@ contract OptionToken is Owned, SimpleInitializable, ReentrancyGuard, ERC721Enume
       _burn(positionIds[i]);
     }
   }
-
-  /////////////////
-  // Liquidation //
-  /////////////////
-
-  /**
-   * @notice checks of liquidation is valid, burns liquidation position and determines fee distribution
-   * @dev called when 'OptionMarket.liquidatePosition()' is called
-   *
-   * @param positionId position id to liquidate
-   * @param trade TradeParameters as defined in OptionMarket
-   * @param totalCost totalCost paid to LiquidityPool from position.collateral (excludes liquidation fees)
-   */
-  function liquidate(
-    uint positionId,
-    OptionMarket.TradeParameters memory trade,
-    uint totalCost
-  ) external onlyOptionMarket returns (LiquidationFees memory liquidationFees) {
+  function liquidate(uint positionId, OptionMarket.TradeParameters memory trade, uint totalCost) external onlyOptionMarket returns (LiquidationFees memory liquidationFees) {
     OptionPosition storage position = positions[positionId];
 
     if (!canLiquidate(position, trade.expiry, trade.strikePrice, trade.spotPrice)) {
@@ -396,107 +286,7 @@ contract OptionToken is Owned, SimpleInitializable, ReentrancyGuard, ERC721Enume
 
     return getLiquidationFees(totalCost, position.collateral, convertedMinLiquidationFee, insolvencyMultiplier);
   }
-
-  /**
-   * @notice checks whether position is valid and position.collateral < minimum required collateral
-   * @dev useful for estimating liquidatability in different spot/strike/expiry scenarios
-   *
-   * @param position any OptionPosition struct (does not need to be an existing position)
-   * @param expiry expiry of option (does not need to match position.strikeId expiry)
-   * @param strikePrice strike price of position
-   * @param spotPrice spot price of base
-   */
-  function canLiquidate(
-    OptionPosition memory position,
-    uint expiry,
-    uint strikePrice,
-    uint spotPrice
-  ) public view returns (bool) {
-    if (!_isShort(position.optionType)) {
-      return false;
-    }
-    if (position.state != PositionState.ACTIVE) {
-      return false;
-    }
-
-    // Option expiry is checked in optionMarket._doTrade()
-    // Will revert if called post expiry
-    uint minCollateral = greekCache.getMinCollateral(
-      position.optionType,
-      strikePrice,
-      expiry,
-      spotPrice,
-      position.amount
-    );
-
-    return position.collateral < minCollateral;
-  }
-
-  /**
-   * @notice gets breakdown of fee distribution during liquidation event
-   * @dev useful for estimating fees earned by all parties during liquidation
-   *
-   * @param gwavPremium totalCost paid to LiquidityPool from position.collateral to close position
-   * @param userPositionCollateral total collateral in position
-   * @param convertedMinLiquidationFee minimum static liquidation fee (defined in partialCollatParams.minLiquidationFee)
-   * @param insolvencyMultiplier used to denominate insolveny in quote in case of base collateral insolvencies
-   */
-  function getLiquidationFees(
-    uint gwavPremium, // quote || base
-    uint userPositionCollateral, // quote || base
-    uint convertedMinLiquidationFee, // quote || base
-    uint insolvencyMultiplier // 1 for quote || spotPrice for base
-  ) public view returns (LiquidationFees memory liquidationFees) {
-    // User is fully solvent
-    uint minOwed = gwavPremium + convertedMinLiquidationFee;
-    uint totalCollatPenalty;
-
-    if (userPositionCollateral >= minOwed) {
-      uint remainingCollateral = userPositionCollateral - gwavPremium;
-      totalCollatPenalty = remainingCollateral.multiplyDecimal(partialCollatParams.penaltyRatio);
-      if (totalCollatPenalty < convertedMinLiquidationFee) {
-        totalCollatPenalty = convertedMinLiquidationFee;
-      }
-      liquidationFees.returnCollateral = remainingCollateral - totalCollatPenalty;
-    } else {
-      // user is insolvent
-      liquidationFees.returnCollateral = 0;
-      // edge case where short call base collat < minLiquidationFee
-      if (userPositionCollateral >= convertedMinLiquidationFee) {
-        totalCollatPenalty = convertedMinLiquidationFee;
-        liquidationFees.insolventAmount = (minOwed - userPositionCollateral).multiplyDecimal(insolvencyMultiplier);
-      } else {
-        totalCollatPenalty = userPositionCollateral;
-        liquidationFees.insolventAmount = (gwavPremium).multiplyDecimal(insolvencyMultiplier);
-      }
-    }
-    liquidationFees.smFee = totalCollatPenalty.multiplyDecimal(partialCollatParams.smFeeRatio);
-    liquidationFees.liquidatorFee = totalCollatPenalty.multiplyDecimal(partialCollatParams.liquidatorFeeRatio);
-    liquidationFees.lpFee = totalCollatPenalty - (liquidationFees.smFee + liquidationFees.liquidatorFee);
-    liquidationFees.lpPremiums = userPositionCollateral - totalCollatPenalty - liquidationFees.returnCollateral;
-  }
-
-  ///////////////
-  // Transfers //
-  ///////////////
-
-  /**
-   * @notice Allows a user to split a curent position into two. The amount of the original position will
-   *         be subtracted from and a new position will be minted with the desired amount and collateral.
-   * @dev Only ACTIVE positions can be owned by users, so status does not need to be checked
-   * @dev Both resulting positions must not be liquidatable
-   *
-   * @param positionId the positionId of the original position to be split
-   * @param newAmount the amount in the new position
-   * @param newCollateral the amount of collateral for the new position
-   * @param recipient recipient of new position
-   */
-  function split(
-    uint positionId,
-    uint newAmount,
-    uint newCollateral,
-    address recipient
-  ) external nonReentrant notGlobalPaused returns (uint newPositionId) {
+  function split(uint positionId, uint newAmount, uint newCollateral, address recipient) external nonReentrant notGlobalPaused returns (uint newPositionId) {
     OptionPosition storage originalPosition = positions[positionId];
 
     // Will both check whether position is valid and whether approved to split
@@ -558,14 +348,6 @@ contract OptionToken is Owned, SimpleInitializable, ReentrancyGuard, ERC721Enume
       block.timestamp
     );
   }
-
-  /**
-   * @notice User can merge many positions with matching strike and optionType into a single position
-   * @dev Only ACTIVE positions can be owned by users, so status does not need to be checked.
-   * @dev Merged position must not be liquidatable.
-   *
-   * @param positionIds the positionIds to be merged together
-   */
   function merge(uint[] memory positionIds) external nonReentrant notGlobalPaused {
     uint positionsLen = positionIds.length;
     if (positionsLen < 2) {
@@ -643,27 +425,73 @@ contract OptionToken is Owned, SimpleInitializable, ReentrancyGuard, ERC721Enume
       block.timestamp
     );
   }
-
-  //////////
-  // Util //
-  //////////
-
-  /// @dev Returns bool on whether the optionType is SHORT_CALL_BASE, SHORT_CALL_QUOTE or SHORT_PUT_QUOTE
   function _isShort(OptionMarket.OptionType optionType) internal pure returns (bool shortPosition) {
     shortPosition = (uint(optionType) >= uint(OptionMarket.OptionType.SHORT_CALL_BASE)) ? true : false;
   }
+  function _beforeTokenTransfer(address from, address to, uint tokenId) internal override {
+    super._beforeTokenTransfer(from, to, tokenId);
 
-  /// @dev Returns the PositionState of a given positionId
+    if (from != address(0) && to != address(0)) {
+      emit PositionUpdated(tokenId, to, PositionUpdatedType.TRANSFER, positions[tokenId], block.timestamp);
+    }
+  }
+
+  // view
+  function canLiquidate(OptionPosition memory position, uint expiry, uint strikePrice, uint spotPrice) public view returns (bool) {
+    if (!_isShort(position.optionType)) {
+      return false;
+    }
+    if (position.state != PositionState.ACTIVE) {
+      return false;
+    }
+
+    // Option expiry is checked in optionMarket._doTrade()
+    // Will revert if called post expiry
+    uint minCollateral = greekCache.getMinCollateral(
+      position.optionType,
+      strikePrice,
+      expiry,
+      spotPrice,
+      position.amount
+    );
+
+    return position.collateral < minCollateral;
+  }
+  function getLiquidationFees(uint gwavPremium, uint userPositionCollateral, uint convertedMinLiquidationFee, uint insolvencyMultiplier) public view returns (LiquidationFees memory liquidationFees) {
+    // User is fully solvent
+    uint minOwed = gwavPremium + convertedMinLiquidationFee;
+    uint totalCollatPenalty;
+
+    if (userPositionCollateral >= minOwed) {
+      uint remainingCollateral = userPositionCollateral - gwavPremium;
+      totalCollatPenalty = remainingCollateral.multiplyDecimal(partialCollatParams.penaltyRatio);
+      if (totalCollatPenalty < convertedMinLiquidationFee) {
+        totalCollatPenalty = convertedMinLiquidationFee;
+      }
+      liquidationFees.returnCollateral = remainingCollateral - totalCollatPenalty;
+    } else {
+      // user is insolvent
+      liquidationFees.returnCollateral = 0;
+      // edge case where short call base collat < minLiquidationFee
+      if (userPositionCollateral >= convertedMinLiquidationFee) {
+        totalCollatPenalty = convertedMinLiquidationFee;
+        liquidationFees.insolventAmount = (minOwed - userPositionCollateral).multiplyDecimal(insolvencyMultiplier);
+      } else {
+        totalCollatPenalty = userPositionCollateral;
+        liquidationFees.insolventAmount = (gwavPremium).multiplyDecimal(insolvencyMultiplier);
+      }
+    }
+    liquidationFees.smFee = totalCollatPenalty.multiplyDecimal(partialCollatParams.smFeeRatio);
+    liquidationFees.liquidatorFee = totalCollatPenalty.multiplyDecimal(partialCollatParams.liquidatorFeeRatio);
+    liquidationFees.lpFee = totalCollatPenalty - (liquidationFees.smFee + liquidationFees.liquidatorFee);
+    liquidationFees.lpPremiums = userPositionCollateral - totalCollatPenalty - liquidationFees.returnCollateral;
+  }
   function getPositionState(uint positionId) external view returns (PositionState) {
     return positions[positionId].state;
   }
-
-  /// @dev Returns an OptionPosition struct of a given positionId
   function getOptionPosition(uint positionId) external view returns (OptionPosition memory) {
     return positions[positionId];
   }
-
-  /// @dev Returns an array of OptionPosition structs given an array of positionIds
   function getOptionPositions(uint[] memory positionIds) external view returns (OptionPosition[] memory) {
     uint positionsLen = positionIds.length;
 
@@ -673,13 +501,9 @@ contract OptionToken is Owned, SimpleInitializable, ReentrancyGuard, ERC721Enume
     }
     return result;
   }
-
-  /// @dev Returns a PositionWithOwner struct of a given positionId (same as OptionPosition but with owner)
   function getPositionWithOwner(uint positionId) external view returns (PositionWithOwner memory) {
     return _getPositionWithOwner(positionId);
   }
-
-  /// @dev Returns an array of PositionWithOwner structs given an array of positionIds
   function getPositionsWithOwner(uint[] memory positionIds) external view returns (PositionWithOwner[] memory) {
     uint positionsLen = positionIds.length;
 
@@ -689,9 +513,6 @@ contract OptionToken is Owned, SimpleInitializable, ReentrancyGuard, ERC721Enume
     }
     return result;
   }
-
-  /// @notice Returns an array of OptionPosition structs owned by a given address
-  /// @dev Meant to be used offchain as it can run out of gas
   function getOwnerPositions(address target) external view returns (OptionPosition[] memory) {
     uint balance = balanceOf(target);
     OptionPosition[] memory result = new OptionPosition[](balance);
@@ -700,7 +521,6 @@ contract OptionToken is Owned, SimpleInitializable, ReentrancyGuard, ERC721Enume
     }
     return result;
   }
-
   function _getPositionWithOwner(uint positionId) internal view returns (PositionWithOwner memory) {
     OptionPosition memory position = positions[positionId];
     return
@@ -714,12 +534,9 @@ contract OptionToken is Owned, SimpleInitializable, ReentrancyGuard, ERC721Enume
         owner: ownerOf(positionId)
       });
   }
-
-  /// @dev returns PartialCollateralParameters struct
   function getPartialCollatParams() external view returns (PartialCollateralParameters memory) {
     return partialCollatParams;
   }
-
   function _requireStrikeNotExpired(uint strikeId) internal view {
     (, uint priceAtExpiry, , ) = optionMarket.getSettlementParameters(strikeId);
     if (priceAtExpiry != 0) {
@@ -727,113 +544,25 @@ contract OptionToken is Owned, SimpleInitializable, ReentrancyGuard, ERC721Enume
     }
   }
 
-  ///////////////
-  // Modifiers //
-  ///////////////
-
-  modifier onlyOptionMarket() {
-    if (msg.sender != address(optionMarket)) {
-      revert OnlyOptionMarket(address(this), msg.sender, address(optionMarket));
-    }
-    _;
-  }
-  modifier onlyShortCollateral() {
-    if (msg.sender != address(shortCollateral)) {
-      revert OnlyShortCollateral(address(this), msg.sender, address(shortCollateral));
-    }
-    _;
-  }
-
-  modifier notGlobalPaused() {
-    exchangeAdapter.requireNotGlobalPaused(address(optionMarket));
-    _;
-  }
-
-  function _beforeTokenTransfer(address from, address to, uint tokenId) internal override {
-    super._beforeTokenTransfer(from, to, tokenId);
-
-    if (from != address(0) && to != address(0)) {
-      emit PositionUpdated(tokenId, to, PositionUpdatedType.TRANSFER, positions[tokenId], block.timestamp);
-    }
-  }
-
-  ////////////
-  // Events //
-  ///////////
-
-  /**
-   * @dev Emitted when the URI is modified
-   */
   event URISet(string URI);
-
-  /**
-   * @dev Emitted when partial collateral parameters are modified
-   */
   event PartialCollateralParamsSet(PartialCollateralParameters partialCollateralParams);
-
-  /**
-   * @dev Emitted when a position is minted, adjusted, burned, merged or split.
-   */
-  event PositionUpdated(
-    uint indexed positionId,
-    address indexed owner,
-    PositionUpdatedType indexed updatedType,
-    OptionPosition position,
-    uint timestamp
-  );
-
-  ////////////
-  // Errors //
-  ////////////
-
-  // Admin
+  event PositionUpdated(uint indexed positionId, address indexed owner, PositionUpdatedType indexed updatedType, OptionPosition position, uint timestamp);
   error InvalidPartialCollateralParameters(address thrower, PartialCollateralParameters partialCollatParams);
-
-  // Adjusting
   error AdjustmentResultsInMinimumCollateralNotBeingMet(address thrower, OptionPosition position, uint spotPrice);
   error CannotClosePositionZero(address thrower);
   error CannotOpenZeroAmount(address thrower);
-  error CannotAdjustInvalidPosition(
-    address thrower,
-    uint positionId,
-    bool invalidPositionId,
-    bool positionInactive,
-    bool strikeMismatch,
-    bool optionTypeMismatch
-  );
+  error CannotAdjustInvalidPosition(address thrower, uint positionId, bool invalidPositionId, bool positionInactive, bool strikeMismatch, bool optionTypeMismatch);
   error OnlyOwnerCanAdjustPosition(address thrower, uint positionId, address trader, address owner);
   error FullyClosingWithNonZeroSetCollateral(address thrower, uint positionId, uint setCollateralTo);
-  error AddingCollateralToInvalidPosition(
-    address thrower,
-    uint positionId,
-    bool invalidPositionId,
-    bool positionInactive,
-    bool isShort
-  );
-
-  // Liquidation
+  error AddingCollateralToInvalidPosition(address thrower, uint positionId, bool invalidPositionId, bool positionInactive, bool isShort);
   error PositionNotLiquidatable(address thrower, OptionPosition position, uint spotPrice);
-
-  // Splitting
   error SplittingUnapprovedPosition(address thrower, address caller, uint positionId);
   error InvalidSplitAmount(address thrower, uint originalPositionAmount, uint splitAmount);
   error ResultingOriginalPositionLiquidatable(address thrower, OptionPosition position, uint spotPrice);
   error ResultingNewPositionLiquidatable(address thrower, OptionPosition position, uint spotPrice);
-
-  // Merging
   error MustMergeTwoOrMorePositions(address thrower);
   error MergingUnapprovedPosition(address thrower, address caller, uint positionId);
-  error PositionMismatchWhenMerging(
-    address thrower,
-    OptionPosition firstPosition,
-    OptionPosition nextPosition,
-    bool ownerMismatch,
-    bool strikeMismatch,
-    bool optionTypeMismatch,
-    bool duplicatePositionId
-  );
-
-  // Access
+  error PositionMismatchWhenMerging(address thrower, OptionPosition firstPosition, OptionPosition nextPosition, bool ownerMismatch, bool strikeMismatch, bool optionTypeMismatch, bool duplicatePositionId);
   error StrikeIsSettled(address thrower, uint strikeId);
   error OnlyOptionMarket(address thrower, address caller, address optionMarket);
   error OnlyShortCollateral(address thrower, address caller, address shortCollateral);
