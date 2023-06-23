@@ -409,5 +409,15 @@ describe('Successful Open v2', async () => {
     console.log(`${await om.getOptionMarketParams()}`);
     await op_1(0, parseEther("1"));
     console.log(`${await om.getOptionMarketParams()}`);
-  })
+    expect(await ga.isGlobalPaused()).false;
+  });
+  it("test003", async() => {
+    console.log(`${await ga.requireNotGlobalPaused(om.address)}`);
+    console.log(`${await ga.requireNotMarketPaused(om.address)}`)
+    console.log(`${formatEther(await ga.rateAndCarry(om.address))}`);
+    console.log(`${formatEther(await ga.getSpotPriceForMarket(om.address, 0))}`);
+    console.log(`${formatEther(await ga.getSettlementPriceForMarket(om.address,0))}`);
+    console.log(`${formatEther(await ga.estimateExchangeToExactQuote(om.address, DEFAULT_BASE_PRICE))}`);
+    console.log(`${formatEther(await ga.estimateExchangeToExactBase(om.address, parseEther('1.0')))}`);
+  });
 });
