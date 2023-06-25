@@ -6,6 +6,7 @@ import { DEFAULT_CB_PARAMS, DEFAULT_LIQUIDITY_POOL_PARAMS } from '../../utils/de
 import { seedFixture } from '../../utils/fixture';
 import { hre } from '../../utils/testSetup';
 import { TestERC20SetDecimals } from '../../../typechain-types';
+import {formatEther, parseEther} from "ethers/lib/utils";
 
 const modLPParams = {
   depositDelay: MONTH_SEC,
@@ -94,6 +95,21 @@ describe('LiquidityPool - Admin', async () => {
       expect(await lp.queuedWithdrawalHead()).eq(1);
       expect(await lp.nextQueuedWithdrawalId()).eq(1);
       expect(await lp.CBTimestamp()).eq(0);
+
+      expect(await lp.getTotalTokenSupply()).eq(parseEther('500000'));
+      expect(await lp.getTokenPrice()).eq(parseEther('1.0'));
+      const _getLiquidity = await lp.getLiquidity();
+      expect(_getLiquidity[0]).eq(parseEther('500000'));
+      expect(_getLiquidity[1]).eq(parseEther('500000'));
+      expect(_getLiquidity[2]).eq(0);
+      expect(_getLiquidity[3]).eq(0);
+      expect(_getLiquidity[4]).eq(0);
+      expect(_getLiquidity[5]).eq(parseEther('500000'));
+      expect(_getLiquidity[6]).eq(parseEther('1.0'));
+      expect(await lp.getTotalPoolValueQuote()).eq(parseEther('500000'));
+
+      const _getLpParams = await lp.getLpParams();
+      console.log(`${_getLpParams}`);
     });
   });
 
