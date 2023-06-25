@@ -7,6 +7,7 @@ import { seedFixture } from '../../utils/fixture';
 import { hre } from '../../utils/testSetup';
 import { TestERC20SetDecimals } from '../../../typechain-types';
 import {formatEther, parseEther} from "ethers/lib/utils";
+import {constants} from "ethers";
 
 const modLPParams = {
   depositDelay: MONTH_SEC,
@@ -111,6 +112,10 @@ describe('LiquidityPool - Admin', async () => {
       const _getLpParams = await lp.getLpParams();
       console.log(`${_getLpParams}`);
     });
+    it("test002 => lt", async() => {
+      const lt = hre.f.c.liquidityToken;
+      expect(await lt.liquidityPool()).not.eq(constants.AddressZero);
+    })
   });
 
   describe('LP params', async () => {
