@@ -1,119 +1,57 @@
 //SPDX-License-Identifier: ISC
 pragma solidity 0.8.16;
-
-// Libraries
 import "./synthetix/DecimalMath.sol";
 import "./synthetix/SignedDecimalMath.sol";
+import "./synthetix/Owned.sol";
 import "./libraries/BlackScholes.sol";
 import "./libraries/ConvertDecimals.sol";
 import "./libraries/Math.sol";
 import "./libraries/GWAV.sol";
-
-// Inherited
-import "./synthetix/Owned.sol";
 import "./libraries/SimpleInitializable.sol";
 import "openzeppelin-contracts-4.4.1/security/ReentrancyGuard.sol";
 
-// Interfaces
 import "./BaseExchangeAdapter.sol";
 import "./OptionMarket.sol";
 import "./OptionMarketPricer.sol";
 
-/**
- * @title OptionGreekCache
- * @author Lyra
- * @dev Aggregates the netDelta and netStdVega of the OptionMarket by iterating over current strikes, using gwav vols.
- * Needs to be called by an external actor as it's not feasible to do all the computation during the trade flow and
- * because delta/vega change over time and with movements in asset price and volatility.
- * All stored values in this contract are the aggregate of the trader's perspective. So values need to be inverted
- * to get the LP's perspective
- * Also handles logic for figuring out minimal collateral requirements for shorts.
- */
 contract OptionGreekCache is Owned, SimpleInitializable, ReentrancyGuard {
   using DecimalMath for uint;
   using SignedDecimalMath for int;
   using GWAV for GWAV.Params;
   using BlackScholes for BlackScholes.BlackScholesInputs;
-
-  ////////////////
-  // Parameters //
-  ////////////////
-
   struct GreekCacheParameters {
-    // Cap the number of strikes per board to avoid hitting gasLimit constraints
     uint maxStrikesPerBoard;
-    // How much spot price can move since last update before deposits/withdrawals are blocked
     uint acceptableSpotPricePercentMove;
-    // How much time has passed since last update before deposits/withdrawals are blocked
     uint staleUpdateDuration;
-    // Length of the GWAV for the baseline volatility used to fire the vol circuit breaker
     uint varianceIvGWAVPeriod;
-    // Length of the GWAV for the skew ratios used to fire the vol circuit breaker
     uint varianceSkewGWAVPeriod;
-    // Length of the GWAV for the baseline used to determine the NAV of the pool
     uint optionValueIvGWAVPeriod;
-    // Length of the GWAV for the skews used to determine the NAV of the pool
     uint optionValueSkewGWAVPeriod;
-    // Minimum skew that will be fed into the GWAV calculation
-    // Prevents near 0 values being used to heavily manipulate the GWAV
     uint gwavSkewFloor;
-    // Maximum skew that will be fed into the GWAV calculation
     uint gwavSkewCap;
   }
-
   struct ForceCloseParameters {
-    // Length of the GWAV for the baseline vol used in ForceClose() and liquidations
     uint ivGWAVPeriod;
-    // Length of the GWAV for the skew ratio used in ForceClose() and liquidations
     uint skewGWAVPeriod;
-    // When a user buys back an option using ForceClose() we increase the GWAV vol to penalise the trader
     uint shortVolShock;
-    // Increase the penalty when within the trading cutoff
     uint shortPostCutoffVolShock;
-    // When a user sells back an option to the AMM using ForceClose(), we decrease the GWAV to penalise the seller
     uint longVolShock;
-    // Increase the penalty when within the trading cutoff
     uint longPostCutoffVolShock;
-    // Same justification as shortPostCutoffVolShock
     uint liquidateVolShock;
-    // Increase the penalty when within the trading cutoff
     uint liquidatePostCutoffVolShock;
-    // Minimum price the AMM will sell back an option at for force closes (as a % of current spot)
     uint shortSpotMin;
-    // Minimum price the AMM will sell back an option at for liquidations (as a % of current spot)
     uint liquidateSpotMin;
   }
-
   struct MinCollateralParameters {
-    // Minimum collateral that must be posted for a short to be opened (denominated in quote)
     uint minStaticQuoteCollateral;
-    // Minimum collateral that must be posted for a short to be opened (denominated in base)
     uint minStaticBaseCollateral;
-    /* Shock Vol:
-     * Vol used to compute the minimum collateral requirements for short positions.
-     * This value is derived from the following chart, created by using the 4 values listed below.
-     *
-     *     vol
-     *      |
-     * volA |____
-     *      |    \
-     * volB |     \___
-     *      |___________ time to expiry
-     *         A   B
-     */
     uint shockVolA;
     uint shockVolPointA;
     uint shockVolB;
     uint shockVolPointB;
-    // Static percentage shock to the current spot price for calls
     uint callSpotPriceShock;
-    // Static percentage shock to the current spot price for puts
     uint putSpotPriceShock;
   }
-
-  ///////////////////
-  // Cache storage //
-  ///////////////////
   struct GlobalCache {
     uint minUpdatedAt;
     uint minUpdatedAtPrice;
@@ -122,7 +60,6 @@ contract OptionGreekCache is Owned, SimpleInitializable, ReentrancyGuard {
     uint maxIvVariance;
     NetGreeks netGreeks;
   }
-
   struct OptionBoardCache {
     uint id;
     uint[] strikes;
@@ -134,19 +71,16 @@ contract OptionGreekCache is Owned, SimpleInitializable, ReentrancyGuard {
     uint maxSkewVariance;
     uint ivVariance;
   }
-
   struct StrikeCache {
     uint id;
     uint boardId;
     uint strikePrice;
     uint skew;
     StrikeGreeks greeks;
-    int callExposure; // long - short
-    int putExposure; // long - short
-    uint skewVariance; // (GWAVSkew - skew)
+    int callExposure;
+    int putExposure;
+    uint skewVariance;
   }
-
-  // These are based on GWAVed iv
   struct StrikeGreeks {
     int callDelta;
     int putDelta;
@@ -154,17 +88,11 @@ contract OptionGreekCache is Owned, SimpleInitializable, ReentrancyGuard {
     uint callPrice;
     uint putPrice;
   }
-
-  // These are based on GWAVed iv
   struct NetGreeks {
     int netDelta;
     int netStdVega;
     int netOptionValue;
   }
-
-  ///////////////
-  // In-memory //
-  ///////////////
   struct TradePricing {
     uint optionPrice;
     int preTradeAmmNetStdVega;
@@ -174,7 +102,6 @@ contract OptionGreekCache is Owned, SimpleInitializable, ReentrancyGuard {
     uint ivVariance;
     uint vega;
   }
-
   struct BoardGreeksView {
     NetGreeks boardGreeks;
     uint ivGWAV;
@@ -182,55 +109,25 @@ contract OptionGreekCache is Owned, SimpleInitializable, ReentrancyGuard {
     uint[] skewGWAVs;
   }
 
-  ///////////////
-  // Variables //
-  ///////////////
   BaseExchangeAdapter internal exchangeAdapter;
   OptionMarket internal optionMarket;
   address internal optionMarketPricer;
-
   GreekCacheParameters internal greekCacheParams;
   ForceCloseParameters internal forceCloseParams;
   MinCollateralParameters internal minCollatParams;
-
-  // Cached values and GWAVs
-  /// @dev Should be a clone of OptionMarket.liveBoards
   uint[] internal liveBoards;
   GlobalCache internal globalCache;
-
   mapping(uint => OptionBoardCache) internal boardCaches;
   mapping(uint => GWAV.Params) internal boardIVGWAV;
-
   mapping(uint => StrikeCache) internal strikeCaches;
   mapping(uint => GWAV.Params) internal strikeSkewGWAV;
 
-  ///////////
-  // Setup //
-  ///////////
-
   constructor() Owned() {}
-
-  /**
-   * @dev Initialize the contract.
-   *
-   * @param _exchangeAdapter BaseExchangeAdapter address
-   * @param _optionMarket OptionMarket address
-   * @param _optionMarketPricer OptionMarketPricer address
-   */
-  function init(
-    BaseExchangeAdapter _exchangeAdapter,
-    OptionMarket _optionMarket,
-    address _optionMarketPricer
-  ) external onlyOwner initializer {
+  function init(BaseExchangeAdapter _exchangeAdapter, OptionMarket _optionMarket, address _optionMarketPricer) external onlyOwner initializer {
     exchangeAdapter = _exchangeAdapter;
     optionMarket = _optionMarket;
     optionMarketPricer = _optionMarketPricer;
   }
-
-  ///////////
-  // Admin //
-  ///////////
-
   function setGreekCacheParameters(GreekCacheParameters memory _greekCacheParams) external onlyOwner {
     if (
       !(_greekCacheParams.acceptableSpotPricePercentMove <= 10e18 && //
@@ -253,7 +150,6 @@ contract OptionGreekCache is Owned, SimpleInitializable, ReentrancyGuard {
     greekCacheParams = _greekCacheParams;
     emit GreekCacheParametersSet(greekCacheParams);
   }
-
   function setForceCloseParameters(ForceCloseParameters memory _forceCloseParams) external onlyOwner {
     if (
       !(_forceCloseParams.ivGWAVPeriod > 0 &&
@@ -277,7 +173,6 @@ contract OptionGreekCache is Owned, SimpleInitializable, ReentrancyGuard {
     forceCloseParams = _forceCloseParams;
     emit ForceCloseParametersSet(forceCloseParams);
   }
-
   function setMinCollateralParameters(MinCollateralParameters memory _minCollatParams) external onlyOwner {
     if (
       !(_minCollatParams.minStaticQuoteCollateral > 0 &&
@@ -295,22 +190,18 @@ contract OptionGreekCache is Owned, SimpleInitializable, ReentrancyGuard {
     minCollatParams = _minCollatParams;
     emit MinCollateralParametersSet(minCollatParams);
   }
+  function setBoardIv(uint boardId, uint newBaseIv) external onlyOptionMarket {
+    OptionBoardCache storage boardCache = boardCaches[boardId];
+    _updateBoardIv(boardCache, newBaseIv);
+    emit BoardIvUpdated(boardId, newBaseIv, globalCache.maxIvVariance);
+  }
+  function setStrikeSkew(uint strikeId, uint newSkew) external onlyOptionMarket {
+    StrikeCache storage strikeCache = strikeCaches[strikeId];
+    OptionBoardCache storage boardCache = boardCaches[strikeCache.boardId];
+    _updateStrikeSkew(boardCache, strikeCache, newSkew);
+  }
 
-  //////////////////////////////////////////////////////
-  // Sync Boards with OptionMarket (onlyOptionMarket) //
-  //////////////////////////////////////////////////////
-
-  /**
-   * @notice Adds a new OptionBoardCache
-   * @dev Called by the OptionMarket whenever a new OptionBoard is added
-   *
-   * @param board The new OptionBoard
-   * @param strikes The new Strikes for the given board
-   */
-  function addBoard(
-    OptionMarket.OptionBoard memory board,
-    OptionMarket.Strike[] memory strikes
-  ) external onlyOptionMarket {
+  function addBoard(OptionMarket.OptionBoard memory board, OptionMarket.Strike[] memory strikes) external onlyOptionMarket {
     uint strikesLength = strikes.length;
     if (strikesLength > greekCacheParams.maxStrikesPerBoard) {
       revert BoardStrikeLimitExceeded(address(this), board.id, strikesLength, greekCacheParams.maxStrikesPerBoard);
@@ -333,8 +224,6 @@ contract OptionGreekCache is Owned, SimpleInitializable, ReentrancyGuard {
 
     updateBoardCachedGreeks(board.id);
   }
-
-  /// @dev After board settlement, remove an OptionBoardCache. Called by OptionMarket
   function removeBoard(uint boardId) external onlyOptionMarket {
     // Remove board from cache, removing net positions from global count
     OptionBoardCache memory boardCache = boardCaches[boardId];
@@ -360,8 +249,6 @@ contract OptionGreekCache is Owned, SimpleInitializable, ReentrancyGuard {
     emit GlobalCacheUpdated(globalCache);
     delete boardCaches[boardId];
   }
-
-  /// @dev Add a new strike to a given boardCache. Only callable by OptionMarket.
   function addStrikeToBoard(uint boardId, uint strikeId, uint strikePrice, uint skew) external onlyOptionMarket {
     OptionBoardCache storage boardCache = boardCaches[boardId];
     if (boardCache.strikes.length == greekCacheParams.maxStrikesPerBoard) {
@@ -376,33 +263,7 @@ contract OptionGreekCache is Owned, SimpleInitializable, ReentrancyGuard {
     _addNewStrikeToStrikeCache(boardCache, strikeId, strikePrice, skew);
     updateBoardCachedGreeks(boardId);
   }
-
-  /// @dev Updates an OptionBoard's baseIv. Only callable by OptionMarket.
-  function setBoardIv(uint boardId, uint newBaseIv) external onlyOptionMarket {
-    OptionBoardCache storage boardCache = boardCaches[boardId];
-    _updateBoardIv(boardCache, newBaseIv);
-    emit BoardIvUpdated(boardId, newBaseIv, globalCache.maxIvVariance);
-  }
-
-  /**
-   * @dev Updates a Strike's skew. Only callable by OptionMarket.
-   *
-   * @param strikeId The id of the Strike
-   * @param newSkew The new skew of the given Strike
-   */
-  function setStrikeSkew(uint strikeId, uint newSkew) external onlyOptionMarket {
-    StrikeCache storage strikeCache = strikeCaches[strikeId];
-    OptionBoardCache storage boardCache = boardCaches[strikeCache.boardId];
-    _updateStrikeSkew(boardCache, strikeCache, newSkew);
-  }
-
-  /// @dev Adds a new strike to a given board, initialising the skew GWAV
-  function _addNewStrikeToStrikeCache(
-    OptionBoardCache storage boardCache,
-    uint strikeId,
-    uint strikePrice,
-    uint skew
-  ) internal {
+  function _addNewStrikeToStrikeCache(OptionBoardCache storage boardCache, uint strikeId, uint strikePrice, uint skew) internal {
     // This is only called when a new board or a new strike is added, so exposure values will be 0
     StrikeCache storage strikeCache = strikeCaches[strikeId];
     strikeCache.id = strikeId;
@@ -421,24 +282,7 @@ contract OptionGreekCache is Owned, SimpleInitializable, ReentrancyGuard {
 
     boardCache.strikes.push(strikeId);
   }
-
-  //////////////////////////////////////////////
-  // Updating exposure/getting option pricing //
-  //////////////////////////////////////////////
-
-  /**
-   * @notice During a trade, updates the exposure of the given strike, board and global state. Computes the cost of the
-   * trade and returns it to the OptionMarketPricer.
-   * @return pricing The final price of the option to be paid for by the user. This could use marketVol or shockVol,
-   * depending on the trade executed.
-   */
-  function updateStrikeExposureAndGetPrice(
-    OptionMarket.Strike memory strike,
-    OptionMarket.TradeParameters memory trade,
-    uint iv,
-    uint skew,
-    bool isPostCutoff
-  ) external onlyOptionMarketPricer returns (TradePricing memory pricing) {
+  function updateStrikeExposureAndGetPrice(OptionMarket.Strike memory strike, OptionMarket.TradeParameters memory trade, uint iv, uint skew, bool isPostCutoff) external onlyOptionMarketPricer returns (TradePricing memory pricing) {
     StrikeCache storage strikeCache = strikeCaches[strike.id];
     OptionBoardCache storage boardCache = boardCaches[strikeCache.boardId];
 
@@ -469,15 +313,7 @@ contract OptionGreekCache is Owned, SimpleInitializable, ReentrancyGuard {
 
     return pricing;
   }
-
-  /// @dev Updates the exposure of the strike and computes the market black scholes price
-  function _updateStrikeExposureAndGetPrice(
-    StrikeCache storage strikeCache,
-    OptionBoardCache storage boardCache,
-    OptionMarket.TradeParameters memory trade,
-    int newCallExposure,
-    int newPutExposure
-  ) internal returns (TradePricing memory pricing) {
+  function _updateStrikeExposureAndGetPrice(StrikeCache storage strikeCache, OptionBoardCache storage boardCache, OptionMarket.TradeParameters memory trade, int newCallExposure, int newPutExposure) internal returns (TradePricing memory pricing) {
     BlackScholes.PricesDeltaStdVega memory pricesDeltaStdVega = BlackScholes
       .BlackScholesInputs({
         timeToExpirySec: _timeToMaturitySeconds(boardCache.expiry),
@@ -534,7 +370,7 @@ contract OptionGreekCache is Owned, SimpleInitializable, ReentrancyGuard {
 
   /**
    * @notice Calculate price paid by the user to forceClose an options position
-   * 
+   *
    * @param trade TradeParameter as defined in OptionMarket
    * @param strike strikes details (including total exposure)
    * @param expiry expiry of option
