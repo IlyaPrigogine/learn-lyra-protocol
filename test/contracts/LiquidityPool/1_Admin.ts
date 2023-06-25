@@ -115,6 +115,10 @@ describe('LiquidityPool - Admin', async () => {
     it("test002 => lt", async() => {
       const lt = hre.f.c.liquidityToken;
       expect(await lt.liquidityPool()).not.eq(constants.AddressZero);
+      expect(await lt.liquidityTracker()).eq(constants.AddressZero);
+      expect(await lt.name()).eq('sUSD/sETH Pool Tokens');
+      expect(await lt.symbol()).eq('LyraELPT');
+      expect(await lt.totalSupply()).eq(parseEther('500000'));
     })
   });
 
