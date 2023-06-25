@@ -61,7 +61,6 @@ describe('LiquidityPool - Admin', async () => {
         ),
       ).to.be.revertedWith('AlreadyInitialised');
     });
-
     it('only owner can initialize', async () => {
       await expect(
         hre.f.c.liquidityPool
@@ -85,6 +84,16 @@ describe('LiquidityPool - Admin', async () => {
           hre.f.c.liquidityPool.address,
         ),
       ).be.true;
+    });
+    it("test001 => LP params", async() => {
+      const lp = hre.f.c.liquidityPool;
+      expect(await lp.totalQueuedDeposits()).eq(0);
+      expect(await lp.queuedDepositHead()).eq(1);
+      expect(await lp.nextQueuedDepositId()).eq(1);
+      expect(await lp.totalQueuedWithdrawals()).eq(0);
+      expect(await lp.queuedWithdrawalHead()).eq(1);
+      expect(await lp.nextQueuedWithdrawalId()).eq(1);
+      expect(await lp.CBTimestamp()).eq(0);
     });
   });
 

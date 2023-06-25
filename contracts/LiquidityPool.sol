@@ -1,19 +1,13 @@
 //SPDX-License-Identifier: ISC
-
 pragma solidity 0.8.16;
-
-// Libraries
-import "./synthetix/DecimalMath.sol";
-import "./libraries/ConvertDecimals.sol";
 import "openzeppelin-contracts-4.4.1/utils/math/SafeCast.sol";
-
-// Inherited
-import "./synthetix/Owned.sol";
-import "./libraries/SimpleInitializable.sol";
 import "openzeppelin-contracts-4.4.1/security/ReentrancyGuard.sol";
-
-// Interfaces
+import "./synthetix/Owned.sol";
+import "./synthetix/DecimalMath.sol";
+import "./libraries/SimpleInitializable.sol";
+import "./libraries/ConvertDecimals.sol";
 import "./interfaces/IERC20Decimals.sol";
+
 import "./LiquidityToken.sol";
 import "./OptionGreekCache.sol";
 import "./OptionMarket.sol";
@@ -21,102 +15,54 @@ import "./ShortCollateral.sol";
 import "./libraries/PoolHedger.sol";
 import "./BaseExchangeAdapter.sol";
 
-/**
- * @title LiquidityPool
- * @author Lyra
- * @dev Holds funds from LPs, which are used for the following purposes:
- * 1. Collateralizing options sold by the OptionMarket.
- * 2. Buying options from users.
- * 3. Delta hedging the LPs.
- * 4. Storing funds for expired in the money options.
- */
 contract LiquidityPool is Owned, SimpleInitializable, ReentrancyGuard {
   using DecimalMath for uint;
-
   struct Collateral {
-    // This is the total amount of puts * strike
     uint quote;
-    // This is the total amount of calls
     uint base;
   }
-
-  /// These values are all in quoteAsset amounts.
   struct Liquidity {
-    // Amount of liquidity available for option collateral and premiums
     uint freeLiquidity;
-    // Amount of liquidity available for withdrawals - different to freeLiquidity
     uint burnableLiquidity;
-    // Amount of liquidity reserved for long options sold to traders
     uint reservedCollatLiquidity;
-    // Portion of liquidity reserved for delta hedging (quote outstanding)
     uint pendingDeltaLiquidity;
-    // Current value of delta hedge
     uint usedDeltaLiquidity;
-    // Net asset value, including everything and netOptionValue
     uint NAV;
-    // longs scaled down by this factor in a contract adjustment event
     uint longScaleFactor;
   }
-
   struct QueuedDeposit {
     uint id;
-    // Who will receive the LiquidityToken minted for this deposit after the wait time
     address beneficiary;
-    // The amount of quoteAsset deposited to be converted to LiquidityToken after wait time
     uint amountLiquidity;
-    // The amount of LiquidityToken minted. Will equal to 0 if not processed
     uint mintedTokens;
     uint depositInitiatedTime;
   }
-
   struct QueuedWithdrawal {
     uint id;
-    // Who will receive the quoteAsset returned after burning the LiquidityToken
     address beneficiary;
-    // The amount of LiquidityToken being burnt after the wait time
     uint amountTokens;
-    // The amount of quote transferred. Will equal to 0 if process not started
     uint quoteSent;
     uint withdrawInitiatedTime;
   }
-
   struct LiquidityPoolParameters {
-    // The minimum amount of quoteAsset for a deposit, or the amount of LiquidityToken for a withdrawal
     uint minDepositWithdraw;
-    // Time between initiating a deposit and when it can be processed
     uint depositDelay;
-    // Time between initiating a withdrawal and when it can be processed
     uint withdrawalDelay;
-    // Fee charged on withdrawn funds
     uint withdrawalFee;
-    // The address of the "guardian"
     address guardianMultisig;
-    // Length of time a deposit/withdrawal since initiation for before a guardian can force process their transaction
     uint guardianDelay;
-    // Percentage of liquidity that can be used in a contract adjustment event
     uint adjustmentNetScalingFactor;
-    // Scale amount of long call collateral held by the LP
     uint callCollatScalingFactor;
-    // Scale amount of long put collateral held by the LP
     uint putCollatScalingFactor;
   }
-
   struct CircuitBreakerParameters {
-    // Percentage of NAV below which the liquidity CB fires
     uint liquidityCBThreshold;
-    // Length of time after the liq. CB stops firing during which deposits/withdrawals are still blocked
     uint liquidityCBTimeout;
-    // Difference between the spot and GWAV baseline IVs after which point the vol CB will fire
     uint ivVarianceCBThreshold;
-    // Difference between the spot and GWAV skew ratios after which point the vol CB will fire
     uint skewVarianceCBThreshold;
-    // Length of time after the (base) vol. CB stops firing during which deposits/withdrawals are still blocked
     uint ivVarianceCBTimeout;
-    // Length of time after the (skew) vol. CB stops firing during which deposits/withdrawals are still blocked
     uint skewVarianceCBTimeout;
-    // When a new board is listed, block deposits/withdrawals
     uint boardSettlementCBTimeout;
-    // Timeout on deposits and withdrawals in a contract adjustment event
     uint contractAdjustmentCBTimeout;
   }
 
@@ -125,67 +71,29 @@ contract LiquidityPool is Owned, SimpleInitializable, ReentrancyGuard {
   LiquidityToken internal liquidityToken;
   ShortCollateral internal shortCollateral;
   OptionGreekCache internal greekCache;
-  PoolHedger public poolHedger;
-  IERC20Decimals public quoteAsset;
   IERC20Decimals internal baseAsset;
 
+  PoolHedger public poolHedger;
+  IERC20Decimals public quoteAsset;
   mapping(uint => QueuedDeposit) public queuedDeposits;
-  /// @dev The total amount of quoteAsset pending deposit (that hasn't entered the pool)
+  mapping(uint => QueuedWithdrawal) public queuedWithdrawals;
   uint public totalQueuedDeposits = 0;
-
-  /// @dev The next queue item that needs to be processed
   uint public queuedDepositHead = 1;
   uint public nextQueuedDepositId = 1;
-
-  mapping(uint => QueuedWithdrawal) public queuedWithdrawals;
   uint public totalQueuedWithdrawals = 0;
-
-  /// @dev The next queue item that needs to be processed
   uint public queuedWithdrawalHead = 1;
   uint public nextQueuedWithdrawalId = 1;
-
-  /// @dev Parameters relating to depositing and withdrawing from the Lyra LP
-  LiquidityPoolParameters public lpParams;
-  /// @dev Parameters relating to circuit breakers
-  CircuitBreakerParameters public cbParams;
-
-  // timestamp for when deposits/withdrawals will be available to deposit/withdraw
-  // This checks if liquidity is all used - adds 3 days to block.timestamp if it is
-  // This also checks if vol variance is high - adds 12 hrs to block.timestamp if it is
   uint public CBTimestamp = 0;
-
-  ////
-  // Other Variables
-  ////
-  /// @dev Amount of collateral locked for outstanding calls and puts sold to users
+  LiquidityPoolParameters public lpParams;
+  CircuitBreakerParameters public cbParams;
   Collateral public lockedCollateral;
-  /// @dev Total amount of quoteAsset reserved for all settled options that have yet to be paid out
   uint public totalOutstandingSettlements;
-  /// @dev Total value not transferred to this contract for all shorts that didn't have enough collateral after expiry
   uint public insolventSettlementAmount;
-  /// @dev Total value not transferred to this contract for all liquidations that didn't have enough collateral when liquidated
   uint public liquidationInsolventAmount;
-
-  /// @dev Quote amount that's protected for LPs in case of AMM insolvencies
   uint public protectedQuote;
 
-  ///////////
-  // Setup //
-  ///////////
-
   constructor() Owned() {}
-
-  /// @dev Initialise important addresses for the contract
-  function init(
-    BaseExchangeAdapter _exchangeAdapter,
-    OptionMarket _optionMarket,
-    LiquidityToken _liquidityToken,
-    OptionGreekCache _greekCache,
-    PoolHedger _poolHedger,
-    ShortCollateral _shortCollateral,
-    IERC20Decimals _quoteAsset,
-    IERC20Decimals _baseAsset
-  ) external onlyOwner initializer {
+  function init(BaseExchangeAdapter _exchangeAdapter, OptionMarket _optionMarket, LiquidityToken _liquidityToken, OptionGreekCache _greekCache, PoolHedger _poolHedger, ShortCollateral _shortCollateral, IERC20Decimals _quoteAsset, IERC20Decimals _baseAsset) external onlyOwner initializer {
     exchangeAdapter = _exchangeAdapter;
     optionMarket = _optionMarket;
     liquidityToken = _liquidityToken;
@@ -195,12 +103,6 @@ contract LiquidityPool is Owned, SimpleInitializable, ReentrancyGuard {
     quoteAsset = _quoteAsset;
     baseAsset = _baseAsset;
   }
-
-  ///////////
-  // Admin //
-  ///////////
-
-  /// @notice set `LiquidityPoolParameteres`
   function setLiquidityPoolParameters(LiquidityPoolParameters memory _lpParams) external onlyOwner {
     if (
       !(_lpParams.depositDelay < 365 days &&
@@ -215,8 +117,6 @@ contract LiquidityPool is Owned, SimpleInitializable, ReentrancyGuard {
 
     emit LiquidityPoolParametersUpdated(lpParams);
   }
-
-  /// @notice set `LiquidityPoolParameteres`
   function setCircuitBreakerParameters(CircuitBreakerParameters memory _cbParams) external onlyOwner {
     if (
       !(_cbParams.liquidityCBThreshold < DecimalMath.UNIT &&
@@ -232,14 +132,10 @@ contract LiquidityPool is Owned, SimpleInitializable, ReentrancyGuard {
 
     emit CircuitBreakerParametersUpdated(cbParams);
   }
-
-  /// @dev Swap out current PoolHedger with a new contract
   function setPoolHedger(PoolHedger newPoolHedger) external onlyOwner {
     poolHedger = newPoolHedger;
     emit PoolHedgerUpdated(poolHedger);
   }
-
-  /// @notice Allow incorrectly sent funds to be recovered
   function recoverFunds(IERC20Decimals token, address recipient) external onlyOwner {
     if (token == quoteAsset || token == baseAsset) {
       revert CannotRecoverQuoteBase(address(this));
@@ -247,18 +143,6 @@ contract LiquidityPool is Owned, SimpleInitializable, ReentrancyGuard {
     token.transfer(recipient, token.balanceOf(address(this)));
   }
 
-  //////////////////////////////
-  // Deposits and Withdrawals //
-  //////////////////////////////
-
-  /**
-   * @notice LP will send sUSD into the contract in return for LiquidityToken (representative of their share of the entire pool)
-   *         to be given either instantly (if no live boards) or after the delay period passes (including CBs).
-   *         This action is not reversible.
-   *
-   * @param beneficiary will receive the LiquidityToken after the deposit is processed
-   * @param amountQuote is the amount of sUSD the LP is depositing
-   */
   function initiateDeposit(address beneficiary, uint amountQuote) external nonReentrant {
     uint realQuote = amountQuote;
 
@@ -302,17 +186,6 @@ contract LiquidityPool is Owned, SimpleInitializable, ReentrancyGuard {
       revert QuoteTransferFailed(address(this), msg.sender, address(this), realQuote);
     }
   }
-
-  /**
-   * @notice LP instantly burns LiquidityToken, signalling they wish to withdraw
-   *         their share of the pool in exchange for quote, to be processed instantly (if no live boards)
-   *         or after the delay period passes (including CBs).
-   *         This action is not reversible.
-   *
-   *
-   * @param beneficiary will receive
-   * @param amountLiquidityToken: is the amount of LiquidityToken the LP is withdrawing
-   */
   function initiateWithdraw(address beneficiary, uint amountLiquidityToken) external nonReentrant {
     if (beneficiary == address(0)) {
       revert InvalidBeneficiaryAddress(address(this), beneficiary);
@@ -365,8 +238,6 @@ contract LiquidityPool is Owned, SimpleInitializable, ReentrancyGuard {
     }
     liquidityToken.burn(msg.sender, amountLiquidityToken);
   }
-
-  /// @param limit number of deposit tickets to process in a single transaction to avoid gas limit soft-locks
   function processDepositQueue(uint limit) external nonReentrant {
     Liquidity memory liquidity = _getLiquidityAndUpdateCB();
     uint tokenPrice = _getTokenPrice(liquidity.NAV, getTotalTokenSupply());
@@ -406,8 +277,6 @@ contract LiquidityPool is Owned, SimpleInitializable, ReentrancyGuard {
       );
     }
   }
-
-  /// @param limit number of withdrawal tickets to process in a single transaction to avoid gas limit soft-locks
   function processWithdrawalQueue(uint limit) external nonReentrant {
     uint oldQueuedWithdrawals = totalQueuedWithdrawals;
     for (uint i = 0; i < limit; ++i) {
@@ -487,8 +356,10 @@ contract LiquidityPool is Owned, SimpleInitializable, ReentrancyGuard {
       protectedQuote = liquidity.NAV.multiplyDecimal(DecimalMath.UNIT - lpParams.adjustmentNetScalingFactor);
     }
   }
-
-  /// @dev Checks if deposit/withdrawal ticket can be processed
+  function updateCBs() external nonReentrant {
+    _getLiquidityAndUpdateCB();
+  }
+  //  internals
   function _canProcess(uint initiatedTime, uint minimumDelay, uint entryId) internal returns (bool) {
     bool validEntry = initiatedTime != 0;
     // bypass circuit breaker and stale checks if the guardian is calling and their delay has passed
@@ -508,7 +379,6 @@ contract LiquidityPool is Owned, SimpleInitializable, ReentrancyGuard {
 
     return validEntry && ((!isStale && delaysExpired) || guardianBypass);
   }
-
   function _getBurnableTokensAndAddFee() internal returns (uint burnableTokens, uint tokenPriceWithFee) {
     (uint tokenPrice, uint burnableLiquidity) = _getTokenPriceAndBurnableLiquidity();
     tokenPriceWithFee = (optionMarket.getNumLiveBoards() != 0)
@@ -517,7 +387,6 @@ contract LiquidityPool is Owned, SimpleInitializable, ReentrancyGuard {
 
     return (burnableLiquidity.divideDecimal(tokenPriceWithFee), tokenPriceWithFee);
   }
-
   function _getTokenPriceAndBurnableLiquidity() internal returns (uint tokenPrice, uint burnableLiquidity) {
     Liquidity memory liquidity = _getLiquidityAndUpdateCB();
     uint totalTokenSupply = getTotalTokenSupply();
@@ -525,22 +394,7 @@ contract LiquidityPool is Owned, SimpleInitializable, ReentrancyGuard {
 
     return (tokenPrice, liquidity.burnableLiquidity);
   }
-
-  //////////////////////
-  // Circuit Breakers //
-  //////////////////////
-
-  /// @notice Checks the ivVariance, skewVariance, and liquidity circuit breakers and triggers if necessary
-  function updateCBs() external nonReentrant {
-    _getLiquidityAndUpdateCB();
-  }
-
-  function _updateCBs(
-    Liquidity memory liquidity,
-    uint maxIvVariance,
-    uint maxSkewVariance,
-    int optionValueDebt
-  ) internal {
+  function _updateCBs(Liquidity memory liquidity, uint maxIvVariance, uint maxSkewVariance, int optionValueDebt) internal {
     // don't trigger CBs if pool has no open options
     if (liquidity.reservedCollatLiquidity == 0 && optionValueDebt == 0) {
       return;
@@ -583,17 +437,7 @@ contract LiquidityPool is Owned, SimpleInitializable, ReentrancyGuard {
       );
     }
   }
-
-  ///////////////////////
-  // Only OptionMarket //
-  ///////////////////////
-
-  /**
-   * @notice Locks quote as collateral when the AMM sells a put option.
-   *
-   * @param amount The amount of quote to lock.
-   * @param freeLiquidity The amount of free collateral that can be locked.
-   */
+  // onlyOptionMarket
   function lockPutCollateral(uint amount, uint freeLiquidity, uint strikeId) external onlyOptionMarket {
     if (amount.multiplyDecimal(lpParams.putCollatScalingFactor) > freeLiquidity) {
       revert LockingMoreQuoteThanIsFree(address(this), amount, freeLiquidity, lockedCollateral);
@@ -604,18 +448,7 @@ contract LiquidityPool is Owned, SimpleInitializable, ReentrancyGuard {
     lockedCollateral.quote += amount;
     emit PutCollateralLocked(amount, lockedCollateral.quote);
   }
-
-  /**
-   * @notice Locks quote as collateral when the AMM sells a call option.
-   *
-   * @param amount The amount of quote to lock.
-   */
-  function lockCallCollateral(
-    uint amount,
-    uint spotPrice,
-    uint freeLiquidity,
-    uint strikeId
-  ) external onlyOptionMarket {
+  function lockCallCollateral(uint amount, uint spotPrice, uint freeLiquidity, uint strikeId) external onlyOptionMarket {
     _checkCanHedge(amount, false, strikeId);
 
     if (amount.multiplyDecimal(spotPrice).multiplyDecimal(lpParams.callCollatScalingFactor) > freeLiquidity) {
@@ -629,60 +462,15 @@ contract LiquidityPool is Owned, SimpleInitializable, ReentrancyGuard {
     lockedCollateral.base += amount;
     emit CallCollateralLocked(amount, lockedCollateral.base);
   }
-
-  /**
-   * @notice Frees quote collateral when user closes a long put
-   *         and sends them the option premium
-   *
-   * @param amountQuoteFreed The amount of quote to free.
-   */
-  function freePutCollateralAndSendPremium(
-    uint amountQuoteFreed,
-    address recipient,
-    uint totalCost,
-    uint reservedFee,
-    uint longScaleFactor
-  ) external onlyOptionMarket {
+  function freePutCollateralAndSendPremium(uint amountQuoteFreed, address recipient, uint totalCost, uint reservedFee, uint longScaleFactor) external onlyOptionMarket {
     _freePutCollateral(amountQuoteFreed);
     _sendPremium(recipient, totalCost.multiplyDecimal(longScaleFactor), reservedFee);
   }
-
-  /**
-   * @notice Frees/exchange base collateral when user closes a long call
-   *         and sends the option premium to the user
-   *
-   * @param amountBase The amount of base to free and exchange.
-   */
-  function freeCallCollateralAndSendPremium(
-    uint amountBase,
-    address recipient,
-    uint totalCost,
-    uint reservedFee,
-    uint longScaleFactor
-  ) external onlyOptionMarket {
+  function freeCallCollateralAndSendPremium(uint amountBase, address recipient, uint totalCost, uint reservedFee, uint longScaleFactor) external onlyOptionMarket {
     _freeCallCollateral(amountBase);
     _sendPremium(recipient, totalCost.multiplyDecimal(longScaleFactor), reservedFee);
   }
-
-  /**
-   * @notice Sends premium user selling an option to the pool.
-   * @dev The caller must be the OptionMarket.
-   *
-   * @param recipient The address of the recipient.
-   * @param amountContracts The number of contracts sold to AMM.
-   * @param premium The amount to transfer to the user.
-   * @param freeLiquidity The amount of free collateral liquidity.
-   * @param reservedFee The amount collected by the OptionMarket.
-   */
-  function sendShortPremium(
-    address recipient,
-    uint amountContracts,
-    uint premium,
-    uint freeLiquidity,
-    uint reservedFee,
-    bool isCall,
-    uint strikeId
-  ) external onlyOptionMarket {
+  function sendShortPremium(address recipient, uint amountContracts, uint premium, uint freeLiquidity, uint reservedFee, bool isCall, uint strikeId) external onlyOptionMarket {
     if (premium + reservedFee > freeLiquidity) {
       revert SendPremiumNotEnoughCollateral(address(this), premium, reservedFee, freeLiquidity);
     }
@@ -693,21 +481,7 @@ contract LiquidityPool is Owned, SimpleInitializable, ReentrancyGuard {
     _checkCanHedge(amountContracts, isCall, strikeId);
     _sendPremium(recipient, premium, reservedFee);
   }
-
-  /**
-   * @notice Manages collateral at the time of board liquidation, also converting base received from shortCollateral.
-   *
-   * @param insolventSettlements amount of AMM profits not paid by shortCollateral due to user insolvencies.
-   * @param amountQuoteFreed amount of AMM long put quote collateral that can be freed, including ITM profits.
-   * @param amountQuoteReserved amount of AMM quote reserved for long call/put ITM profits.
-   * @param amountBaseFreed amount of AMM long call base collateral that can be freed, including ITM profits.
-   */
-  function boardSettlement(
-    uint insolventSettlements,
-    uint amountQuoteFreed,
-    uint amountQuoteReserved,
-    uint amountBaseFreed
-  ) external onlyOptionMarket returns (uint) {
+  function boardSettlement(uint insolventSettlements, uint amountQuoteFreed, uint amountQuoteReserved, uint amountBaseFreed) external onlyOptionMarket returns (uint) {
     // Update circuit breaker whenever a board is settled, to pause deposits/withdrawals
     // This allows keepers some time to settle insolvent positions
     if (block.timestamp + cbParams.boardSettlementCBTimeout > CBTimestamp) {
@@ -733,37 +507,19 @@ contract LiquidityPool is Owned, SimpleInitializable, ReentrancyGuard {
     return liquidity.longScaleFactor;
   }
 
-  /**
-   * @notice Frees quote when the AMM buys back/settles a put from the user.
-   * @param amountQuote The amount of quote to free.
-   */
+
   function _freePutCollateral(uint amountQuote) internal {
     // In case of rounding errors
     amountQuote = amountQuote > lockedCollateral.quote ? lockedCollateral.quote : amountQuote;
     lockedCollateral.quote -= amountQuote;
     emit PutCollateralFreed(amountQuote, lockedCollateral.quote);
   }
-
-  /**
-   * @notice Frees quote when the AMM buys back/settles a call from the user.
-   * @param amountBase The amount of base to free.
-   */
-
   function _freeCallCollateral(uint amountBase) internal {
     // In case of rounding errors
     amountBase = amountBase > lockedCollateral.base ? lockedCollateral.base : amountBase;
     lockedCollateral.base -= amountBase;
     emit CallCollateralFreed(amountBase, lockedCollateral.base);
   }
-
-  /**
-   * @notice Sends the premium to a user who is closing a long or opening a short.
-   * @dev The caller must be the OptionMarket.
-   *
-   * @param recipient The address of the recipient.
-   * @param recipientAmount The amount to transfer to the recipient.
-   * @param optionMarketPortion The fee to transfer to the optionMarket.
-   */
   function _sendPremium(address recipient, uint recipientAmount, uint optionMarketPortion) internal {
     _transferQuote(recipient, recipientAmount);
     _transferQuote(address(optionMarket), optionMarketPortion);
@@ -771,17 +527,7 @@ contract LiquidityPool is Owned, SimpleInitializable, ReentrancyGuard {
     emit PremiumTransferred(recipient, recipientAmount, optionMarketPortion);
   }
 
-  //////////////////////////
-  // Only ShortCollateral //
-  //////////////////////////
-
-  /**
-   * @notice Transfers long option settlement profits to `user`.
-   * @dev The caller must be the ShortCollateral.
-   *
-   * @param user The address of the user to send the quote.
-   * @param amount The amount of quote to send.
-   */
+  // onlyShortCollateral
   function sendSettlementValue(address user, uint amount) external onlyShortCollateral {
     // To prevent any potential rounding errors
     if (amount > totalOutstandingSettlements) {
@@ -792,14 +538,6 @@ contract LiquidityPool is Owned, SimpleInitializable, ReentrancyGuard {
 
     emit OutstandingSettlementSent(user, amount, totalOutstandingSettlements);
   }
-
-  /**
-   * @notice Claims AMM profits that were not paid during boardSettlement() due to
-   * total quote insolvencies > total solvent quote collateral.
-   * @dev The caller must be ShortCollateral.
-   *
-   * @param amountQuote The amount of quote to send to the LiquidityPool.
-   */
   function reclaimInsolventQuote(uint amountQuote) external onlyShortCollateral {
     Liquidity memory liquidity = getLiquidity();
     if (amountQuote > liquidity.freeLiquidity) {
@@ -811,14 +549,6 @@ contract LiquidityPool is Owned, SimpleInitializable, ReentrancyGuard {
 
     emit InsolventSettlementAmountUpdated(amountQuote, insolventSettlementAmount);
   }
-
-  /**
-   * @notice Claims AMM profits that were not paid during boardSettlement() due to
-   * total base insolvencies > total solvent base collateral.
-   * @dev The caller must be ShortCollateral.
-   *
-   * @param amountBase The amount of base to send to the LiquidityPool.
-   */
   function reclaimInsolventBase(uint amountBase) external onlyShortCollateral {
     Liquidity memory liquidity = getLiquidity();
 
@@ -846,22 +576,10 @@ contract LiquidityPool is Owned, SimpleInitializable, ReentrancyGuard {
     emit InsolventSettlementAmountUpdated(quoteSpent, insolventSettlementAmount);
   }
 
-  //////////////////////////////
-  // Getting Pool Token Value //
-  //////////////////////////////
-
-  /// @dev Get total number of oustanding LiquidityToken
+  // views
   function getTotalTokenSupply() public view returns (uint) {
     return liquidityToken.totalSupply() + totalQueuedWithdrawals;
   }
-
-  /**
-   * @notice Get current pool token price and check if market conditions warrant an accurate token price
-   *
-   * @return tokenPrice price of token
-   * @return isStale has global cache not been updated in a long time (if stale, greeks may be inaccurate)
-   * @return circuitBreakerExpiry expiry timestamp of the CircuitBreaker (if not expired, greeks may be inaccurate)
-   */
   function getTokenPriceWithCheck() external view returns (uint tokenPrice, bool isStale, uint circuitBreakerExpiry) {
     tokenPrice = getTokenPrice();
     uint spotPrice = exchangeAdapter.getSpotPriceForMarket(
@@ -871,13 +589,10 @@ contract LiquidityPool is Owned, SimpleInitializable, ReentrancyGuard {
     isStale = greekCache.isGlobalCacheStale(spotPrice);
     return (tokenPrice, isStale, CBTimestamp);
   }
-
-  /// @dev Get current pool token price without market condition check
   function getTokenPrice() public view returns (uint) {
     Liquidity memory liquidity = getLiquidity();
     return _getTokenPrice(liquidity.NAV, getTotalTokenSupply());
   }
-
   function _getTokenPrice(uint totalPoolValue, uint totalTokenSupply) internal pure returns (uint) {
     if (totalTokenSupply == 0) {
       return DecimalMath.UNIT;
