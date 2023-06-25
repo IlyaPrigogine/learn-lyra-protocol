@@ -119,7 +119,7 @@ describe('LiquidityPool - Admin', async () => {
       expect(await lt.name()).eq('sUSD/sETH Pool Tokens');
       expect(await lt.symbol()).eq('LyraELPT');
       expect(await lt.totalSupply()).eq(parseEther('500000'));
-    })
+    });
   });
 
   describe('LP params', async () => {

@@ -364,191 +364,13 @@ contract OptionGreekCache is Owned, SimpleInitializable, ReentrancyGuard {
     return pricing;
   }
 
-  /////////////////////////////////////
-  // Liquidation/Force Close pricing //
-  /////////////////////////////////////
 
-  /**
-   * @notice Calculate price paid by the user to forceClose an options position
-   *
-   * @param trade TradeParameter as defined in OptionMarket
-   * @param strike strikes details (including total exposure)
-   * @param expiry expiry of option
-   * @param newVol volatility post slippage as determined in `OptionTokOptionMarketPriceren.ivImpactForTrade()`
-   * @param isPostCutoff flag for whether order is closer to expiry than postCutoff param.
-
-   * @return optionPrice premium to charge for close order (excluding fees added in OptionMarketPricer)
-   * @return forceCloseVol volatility used to calculate optionPrice
-   */
-  function getPriceForForceClose(
-    OptionMarket.TradeParameters memory trade,
-    OptionMarket.Strike memory strike,
-    uint expiry,
-    uint newVol,
-    bool isPostCutoff
-  ) public view returns (uint optionPrice, uint forceCloseVol) {
-    forceCloseVol = _getGWAVVolWithOverride(
-      strike.boardId,
-      strike.id,
-      forceCloseParams.ivGWAVPeriod,
-      forceCloseParams.skewGWAVPeriod
-    );
-
-    if (trade.tradeDirection == OptionMarket.TradeDirection.CLOSE) {
-      // If the tradeDirection is a close, we know the user force closed.
-      if (trade.isBuy) {
-        // closing a short - maximise vol
-        forceCloseVol = Math.max(forceCloseVol, newVol);
-        forceCloseVol = isPostCutoff
-          ? forceCloseVol.multiplyDecimal(forceCloseParams.shortPostCutoffVolShock)
-          : forceCloseVol.multiplyDecimal(forceCloseParams.shortVolShock);
-      } else {
-        // closing a long - minimise vol
-        forceCloseVol = Math.min(forceCloseVol, newVol);
-        forceCloseVol = isPostCutoff
-          ? forceCloseVol.multiplyDecimal(forceCloseParams.longPostCutoffVolShock)
-          : forceCloseVol.multiplyDecimal(forceCloseParams.longVolShock);
-      }
-    } else {
-      // Otherwise it can only be a liquidation
-      forceCloseVol = isPostCutoff
-        ? forceCloseVol.multiplyDecimal(forceCloseParams.liquidatePostCutoffVolShock)
-        : forceCloseVol.multiplyDecimal(forceCloseParams.liquidateVolShock);
-    }
-
-    (uint callPrice, uint putPrice) = BlackScholes
-      .BlackScholesInputs({
-        timeToExpirySec: _timeToMaturitySeconds(expiry),
-        volatilityDecimal: forceCloseVol,
-        spotDecimal: trade.spotPrice,
-        strikePriceDecimal: strike.strikePrice,
-        rateDecimal: exchangeAdapter.rateAndCarry(address(optionMarket))
-      })
-      .optionPrices();
-
-    uint price = (trade.optionType == OptionMarket.OptionType.LONG_PUT ||
-      trade.optionType == OptionMarket.OptionType.SHORT_PUT_QUOTE)
-      ? putPrice
-      : callPrice;
-
-    if (trade.isBuy) {
-      // In the case a short is being closed, ensure the AMM doesn't overpay by charging parity + some excess
-      uint parity = _getParity(strike.strikePrice, trade.spotPrice, trade.optionType);
-      uint minPrice = parity +
-        trade.spotPrice.multiplyDecimal(
-          trade.tradeDirection == OptionMarket.TradeDirection.CLOSE
-            ? forceCloseParams.shortSpotMin
-            : forceCloseParams.liquidateSpotMin
-        );
-      price = Math.max(price, minPrice);
-    }
-
-    return (price, forceCloseVol);
-  }
-
-  function _getGWAVVolWithOverride(
-    uint boardId,
-    uint strikeId,
-    uint overrideIvPeriod,
-    uint overrideSkewPeriod
-  ) internal view returns (uint gwavVol) {
-    uint gwavIV = boardIVGWAV[boardId].getGWAVForPeriod(overrideIvPeriod, 0);
-    uint strikeGWAVSkew = strikeSkewGWAV[strikeId].getGWAVForPeriod(overrideSkewPeriod, 0);
-    return gwavIV.multiplyDecimal(strikeGWAVSkew);
-  }
-
-  /**
-   * @notice Gets minimum collateral requirement for the specified option
-   *
-   * @param optionType The option type
-   * @param strikePrice The strike price of the option
-   * @param expiry The expiry of the option
-   * @param spotPrice The price of the underlying asset
-   * @param amount The size of the option
-   */
-  function getMinCollateral(
-    OptionMarket.OptionType optionType,
-    uint strikePrice,
-    uint expiry,
-    uint spotPrice,
-    uint amount
-  ) external view returns (uint minCollateral) {
-    if (amount == 0) {
-      return 0;
-    }
-
-    // If put, reduce spot by percentage. If call, increase.
-    uint shockPrice = (optionType == OptionMarket.OptionType.SHORT_PUT_QUOTE)
-      ? spotPrice.multiplyDecimal(minCollatParams.putSpotPriceShock)
-      : spotPrice.multiplyDecimal(minCollatParams.callSpotPriceShock);
-
-    uint timeToMaturity = _timeToMaturitySeconds(expiry);
-
-    (uint callPrice, uint putPrice) = BlackScholes
-      .BlackScholesInputs({
-        timeToExpirySec: timeToMaturity,
-        volatilityDecimal: getShockVol(timeToMaturity),
-        spotDecimal: shockPrice,
-        strikePriceDecimal: strikePrice,
-        rateDecimal: exchangeAdapter.rateAndCarry(address(optionMarket))
-      })
-      .optionPrices();
-
-    uint fullCollat;
-    uint volCollat;
-    uint staticCollat = minCollatParams.minStaticQuoteCollateral;
-    if (optionType == OptionMarket.OptionType.SHORT_CALL_BASE) {
-      // Can be more lenient to SHORT_CALL_BASE traders
-      volCollat = callPrice.multiplyDecimal(amount).divideDecimal(shockPrice);
-      fullCollat = amount;
-      staticCollat = minCollatParams.minStaticBaseCollateral;
-    } else if (optionType == OptionMarket.OptionType.SHORT_CALL_QUOTE) {
-      volCollat = callPrice.multiplyDecimal(amount);
-      fullCollat = type(uint).max;
-    } else {
-      // optionType == OptionMarket.OptionType.SHORT_PUT_QUOTE
-      volCollat = putPrice.multiplyDecimal(amount);
-      fullCollat = amount.multiplyDecimal(strikePrice);
-    }
-
-    return Math.min(Math.max(volCollat, staticCollat), fullCollat);
-  }
-
-  /// @notice Gets shock vol (Vol used to compute the minimum collateral requirements for short positions)
-  function getShockVol(uint timeToMaturity) public view returns (uint) {
-    if (timeToMaturity <= minCollatParams.shockVolPointA) {
-      return minCollatParams.shockVolA;
-    }
-    if (timeToMaturity >= minCollatParams.shockVolPointB) {
-      return minCollatParams.shockVolB;
-    }
-
-    // Flip a and b so we don't need to convert to int
-    return
-      minCollatParams.shockVolA -
-      (((minCollatParams.shockVolA - minCollatParams.shockVolB) * (timeToMaturity - minCollatParams.shockVolPointA)) /
-        (minCollatParams.shockVolPointB - minCollatParams.shockVolPointA));
-  }
-
-  //////////////////////////////////////////
-  // Update GWAV vol greeks and net greeks //
-  //////////////////////////////////////////
-
-  /**
-   * @notice Updates the cached greeks for an OptionBoardCache used to calculate:
-   * - trading fees
-   * - aggregate AMM option value
-   * - net delta exposure for proper hedging
-   *
-   * @param boardId The id of the OptionBoardCache.
-   */
   function updateBoardCachedGreeks(uint boardId) public nonReentrant {
     _updateBoardCachedGreeks(
       exchangeAdapter.getSpotPriceForMarket(address(optionMarket), BaseExchangeAdapter.PriceType.REFERENCE),
       boardId
     );
   }
-
   function _updateBoardCachedGreeks(uint spotPrice, uint boardId) internal {
     OptionBoardCache storage boardCache = boardCaches[boardId];
     if (boardCache.id == 0) {
@@ -598,20 +420,7 @@ contract OptionGreekCache is Owned, SimpleInitializable, ReentrancyGuard {
     emit BoardCacheUpdated(boardCache);
     emit GlobalCacheUpdated(globalCache);
   }
-
-  /**
-   * @dev Updates an StrikeCache using TWAP.
-   * Assumes board has been zeroed out before updating all strikes at once
-   *
-   * @param strikeCache The StrikeCache.
-   * @param boardCache The OptionBoardCache.
-   */
-  function _updateStrikeCachedGreeks(
-    StrikeCache storage strikeCache,
-    OptionBoardCache storage boardCache,
-    uint spotPrice,
-    uint navGWAVvol
-  ) internal {
+  function _updateStrikeCachedGreeks(StrikeCache storage strikeCache, OptionBoardCache storage boardCache, uint spotPrice, uint navGWAVvol) internal {
     BlackScholes.PricesDeltaStdVega memory pricesDeltaStdVega = BlackScholes
       .BlackScholesInputs({
         timeToExpirySec: _timeToMaturitySeconds(boardCache.expiry),
@@ -653,8 +462,6 @@ contract OptionGreekCache is Owned, SimpleInitializable, ReentrancyGuard {
     emit StrikeCacheUpdated(strikeCache);
     emit StrikeSkewUpdated(strikeCache.id, strikeCache.skew, globalCache.maxSkewVariance);
   }
-
-  /// @dev Updates global `lastUpdatedAt`.
   function _updateGlobalLastUpdatedAt() internal {
     OptionBoardCache storage boardCache = boardCaches[liveBoards[0]];
     uint minUpdatedAt = boardCache.updatedAt;
@@ -689,12 +496,6 @@ contract OptionGreekCache is Owned, SimpleInitializable, ReentrancyGuard {
     globalCache.maxSkewVariance = maxSkewVariance;
     globalCache.maxIvVariance = maxIvVariance;
   }
-
-  /////////////////////////
-  // Updating GWAV values //
-  /////////////////////////
-
-  /// @dev updates baseIv for a given board, updating the baseIv gwav
   function _updateBoardIv(OptionBoardCache storage boardCache, uint newIv) internal {
     boardCache.iv = newIv;
     boardIVGWAV[boardCache.id]._write(newIv, block.timestamp);
@@ -703,13 +504,7 @@ contract OptionGreekCache is Owned, SimpleInitializable, ReentrancyGuard {
 
     emit BoardIvUpdated(boardCache.id, newIv, globalCache.maxIvVariance);
   }
-
-  /// @dev updates skew for a given strike, updating the skew gwav
-  function _updateStrikeSkew(
-    OptionBoardCache storage boardCache,
-    StrikeCache storage strikeCache,
-    uint newSkew
-  ) internal {
+  function _updateStrikeSkew(OptionBoardCache storage boardCache, StrikeCache storage strikeCache, uint newSkew) internal {
     strikeCache.skew = newSkew;
 
     strikeSkewGWAV[strikeCache.id]._write(
@@ -722,8 +517,6 @@ contract OptionGreekCache is Owned, SimpleInitializable, ReentrancyGuard {
 
     emit StrikeSkewUpdated(strikeCache.id, newSkew, globalCache.maxSkewVariance);
   }
-
-  /// @dev updates maxIvVariance across all boards
   function _updateMaxIvVariance() internal {
     uint maxIvVariance = boardCaches[liveBoards[0]].ivVariance;
     uint liveBoardsLen = liveBoards.length;
@@ -734,8 +527,6 @@ contract OptionGreekCache is Owned, SimpleInitializable, ReentrancyGuard {
     }
     globalCache.maxIvVariance = maxIvVariance;
   }
-
-  /// @dev updates skewVariance for strike, used to trigger CBs and charge varianceFees
   function _updateStrikeSkewVariance(StrikeCache storage strikeCache) internal {
     uint strikeVarianceGWAVSkew = strikeSkewGWAV[strikeCache.id].getGWAVForPeriod(
       greekCacheParams.varianceSkewGWAVPeriod,
@@ -748,8 +539,6 @@ contract OptionGreekCache is Owned, SimpleInitializable, ReentrancyGuard {
       strikeCache.skewVariance = strikeCache.skew - strikeVarianceGWAVSkew;
     }
   }
-
-  /// @dev updates ivVariance for board, used to trigger CBs and charge varianceFees
   function _updateBoardIvVariance(OptionBoardCache storage boardCache) internal {
     uint boardVarianceGWAVIv = boardIVGWAV[boardCache.id].getGWAVForPeriod(greekCacheParams.varianceIvGWAVPeriod, 0);
 
@@ -759,8 +548,6 @@ contract OptionGreekCache is Owned, SimpleInitializable, ReentrancyGuard {
       boardCache.ivVariance = boardCache.iv - boardVarianceGWAVIv;
     }
   }
-
-  /// @dev updates maxSkewVariance for the board and across all strikes
   function _updateMaxSkewVariance(OptionBoardCache storage boardCache) internal {
     uint maxBoardSkewVariance = strikeCaches[boardCache.strikes[0]].skewVariance;
     uint strikesLen = boardCache.strikes.length;
@@ -782,82 +569,14 @@ contract OptionGreekCache is Owned, SimpleInitializable, ReentrancyGuard {
     globalCache.maxSkewVariance = maxSkewVariance;
   }
 
-  //////////////////////////
-  // Stale cache checking //
-  //////////////////////////
 
-  /**
-   * @notice returns `true` if even one board not updated within `staleUpdateDuration` or
-   *         if spot price moves up/down beyond `acceptablePriceMovement`
-   */
-
-  function isGlobalCacheStale(uint spotPrice) external view returns (bool) {
-    if (liveBoards.length == 0) {
-      return false;
-    } else {
-      return (_isUpdatedAtTimeStale(globalCache.minUpdatedAt) ||
-        !_isPriceMoveAcceptable(globalCache.minUpdatedAtPrice, spotPrice) ||
-        !_isPriceMoveAcceptable(globalCache.maxUpdatedAtPrice, spotPrice));
-    }
-  }
-
-  /**
-   * @notice returns `true` if board not updated within `staleUpdateDuration` or
-   *         if spot price moves up/down beyond `acceptablePriceMovement`
-   */
-  function isBoardCacheStale(uint boardId) external view returns (bool) {
-    uint spotPrice = exchangeAdapter.getSpotPriceForMarket(
-      address(optionMarket),
-      BaseExchangeAdapter.PriceType.REFERENCE
-    );
-    OptionBoardCache memory boardCache = boardCaches[boardId];
-    if (boardCache.id == 0) {
-      revert InvalidBoardId(address(this), boardCache.id);
-    }
-    return (_isUpdatedAtTimeStale(boardCache.updatedAt) ||
-      !_isPriceMoveAcceptable(boardCache.updatedAtPrice, spotPrice));
-  }
-
-  /**
-   * @notice Check if the price move of base asset renders the cache stale.
-   *
-   * @param pastPrice The previous price.
-   * @param currentPrice The current price.
-   */
-  function _isPriceMoveAcceptable(uint pastPrice, uint currentPrice) internal view returns (bool) {
-    uint acceptablePriceMovement = pastPrice.multiplyDecimal(greekCacheParams.acceptableSpotPricePercentMove);
-    if (currentPrice > pastPrice) {
-      return (currentPrice - pastPrice) < acceptablePriceMovement;
-    } else {
-      return (pastPrice - currentPrice) < acceptablePriceMovement;
-    }
-  }
-
-  /**
-   * @notice Checks if board updated within `staleUpdateDuration`.
-   *
-   * @param updatedAt The time of the last update.
-   */
-  function _isUpdatedAtTimeStale(uint updatedAt) internal view returns (bool) {
-    // This can be more complex than just checking the item wasn't updated in the last two hours
-    return _getSecondsTo(updatedAt, block.timestamp) > greekCacheParams.staleUpdateDuration;
-  }
-
-  /////////////////////////////
-  // External View functions //
-  /////////////////////////////
-
-  /// @notice Get the current cached global netDelta exposure.
+  //  views
   function getGlobalNetDelta() external view returns (int) {
     return globalCache.netGreeks.netDelta;
   }
-
-  /// @notice Get the current global net option value
   function getGlobalOptionValue() external view returns (int) {
     return globalCache.netGreeks.netOptionValue;
   }
-
-  /// @notice Returns the BoardGreeksView struct given a specific boardId
   function getBoardGreeksView(uint boardId) external view returns (BoardGreeksView memory) {
     uint strikesLen = boardCaches[boardId].strikes.length;
 
@@ -878,124 +597,228 @@ contract OptionGreekCache is Owned, SimpleInitializable, ReentrancyGuard {
         skewGWAVs: skewGWAVs
       });
   }
-
-  /// @notice Get StrikeCache given a specific strikeId
   function getStrikeCache(uint strikeId) external view returns (StrikeCache memory) {
     return (strikeCaches[strikeId]);
   }
-
-  /// @notice Get OptionBoardCache given a specific boardId
   function getOptionBoardCache(uint boardId) external view returns (OptionBoardCache memory) {
     return (boardCaches[boardId]);
   }
-
-  /// @notice Get the global cache
   function getGlobalCache() external view returns (GlobalCache memory) {
     return globalCache;
   }
-
-  /// @notice Returns ivGWAV for a given boardId and GWAV time interval
   function getIvGWAV(uint boardId, uint secondsAgo) external view returns (uint ivGWAV) {
     return boardIVGWAV[boardId].getGWAVForPeriod(secondsAgo, 0);
   }
-
-  /// @notice Returns skewGWAV for a given strikeId and GWAV time interval
   function getSkewGWAV(uint strikeId, uint secondsAgo) external view returns (uint skewGWAV) {
     return strikeSkewGWAV[strikeId].getGWAVForPeriod(secondsAgo, 0);
   }
-
-  /// @notice Get the GreekCacheParameters
   function getGreekCacheParams() external view returns (GreekCacheParameters memory) {
     return greekCacheParams;
   }
-
-  /// @notice Get the ForceCloseParamters
   function getForceCloseParams() external view returns (ForceCloseParameters memory) {
     return forceCloseParams;
   }
-
-  /// @notice Get the MinCollateralParamters
   function getMinCollatParams() external view returns (MinCollateralParameters memory) {
     return minCollatParams;
   }
-
-  ////////////////////////////
-  // Utility/Math functions //
-  ////////////////////////////
-
-  /// @dev Calculate option payout on expiry given a strikePrice, spot on expiry and optionType.
-  function _getParity(
-    uint strikePrice,
-    uint spot,
-    OptionMarket.OptionType optionType
-  ) internal pure returns (uint parity) {
+  function _getParity(uint strikePrice, uint spot, OptionMarket.OptionType optionType) internal pure returns (uint parity) {
     int diff = (optionType == OptionMarket.OptionType.LONG_PUT || optionType == OptionMarket.OptionType.SHORT_PUT_QUOTE)
       ? SafeCast.toInt256(strikePrice) - SafeCast.toInt256(spot)
       : SafeCast.toInt256(spot) - SafeCast.toInt256(strikePrice);
 
     parity = diff > 0 ? uint(diff) : 0;
   }
-
-  /// @dev Returns time to maturity for a given expiry.
   function _timeToMaturitySeconds(uint expiry) internal view returns (uint) {
     return _getSecondsTo(block.timestamp, expiry);
   }
-
-  /// @dev Returns the difference in seconds between two dates.
   function _getSecondsTo(uint fromTime, uint toTime) internal pure returns (uint) {
     if (toTime > fromTime) {
       return toTime - fromTime;
     }
     return 0;
   }
+  function isGlobalCacheStale(uint spotPrice) external view returns (bool) {
+    if (liveBoards.length == 0) {
+      return false;
+    } else {
+      return (_isUpdatedAtTimeStale(globalCache.minUpdatedAt) ||
+        !_isPriceMoveAcceptable(globalCache.minUpdatedAtPrice, spotPrice) ||
+        !_isPriceMoveAcceptable(globalCache.maxUpdatedAtPrice, spotPrice));
+    }
+  }
+  function isBoardCacheStale(uint boardId) external view returns (bool) {
+    uint spotPrice = exchangeAdapter.getSpotPriceForMarket(
+      address(optionMarket),
+      BaseExchangeAdapter.PriceType.REFERENCE
+    );
+    OptionBoardCache memory boardCache = boardCaches[boardId];
+    if (boardCache.id == 0) {
+      revert InvalidBoardId(address(this), boardCache.id);
+    }
+    return (_isUpdatedAtTimeStale(boardCache.updatedAt) ||
+      !_isPriceMoveAcceptable(boardCache.updatedAtPrice, spotPrice));
+  }
+  function _isPriceMoveAcceptable(uint pastPrice, uint currentPrice) internal view returns (bool) {
+    uint acceptablePriceMovement = pastPrice.multiplyDecimal(greekCacheParams.acceptableSpotPricePercentMove);
+    if (currentPrice > pastPrice) {
+      return (currentPrice - pastPrice) < acceptablePriceMovement;
+    } else {
+      return (pastPrice - currentPrice) < acceptablePriceMovement;
+    }
+  }
+  function _isUpdatedAtTimeStale(uint updatedAt) internal view returns (bool) {
+    // This can be more complex than just checking the item wasn't updated in the last two hours
+    return _getSecondsTo(updatedAt, block.timestamp) > greekCacheParams.staleUpdateDuration;
+  }
+  function getPriceForForceClose(OptionMarket.TradeParameters memory trade, OptionMarket.Strike memory strike, uint expiry, uint newVol, bool isPostCutoff) public view returns (uint optionPrice, uint forceCloseVol) {
+    forceCloseVol = _getGWAVVolWithOverride(
+      strike.boardId,
+      strike.id,
+      forceCloseParams.ivGWAVPeriod,
+      forceCloseParams.skewGWAVPeriod
+    );
 
-  ///////////////
-  // Modifiers //
-  ///////////////
+    if (trade.tradeDirection == OptionMarket.TradeDirection.CLOSE) {
+      // If the tradeDirection is a close, we know the user force closed.
+      if (trade.isBuy) {
+        // closing a short - maximise vol
+        forceCloseVol = Math.max(forceCloseVol, newVol);
+        forceCloseVol = isPostCutoff
+          ? forceCloseVol.multiplyDecimal(forceCloseParams.shortPostCutoffVolShock)
+          : forceCloseVol.multiplyDecimal(forceCloseParams.shortVolShock);
+      } else {
+        // closing a long - minimise vol
+        forceCloseVol = Math.min(forceCloseVol, newVol);
+        forceCloseVol = isPostCutoff
+          ? forceCloseVol.multiplyDecimal(forceCloseParams.longPostCutoffVolShock)
+          : forceCloseVol.multiplyDecimal(forceCloseParams.longVolShock);
+      }
+    } else {
+      // Otherwise it can only be a liquidation
+      forceCloseVol = isPostCutoff
+        ? forceCloseVol.multiplyDecimal(forceCloseParams.liquidatePostCutoffVolShock)
+        : forceCloseVol.multiplyDecimal(forceCloseParams.liquidateVolShock);
+    }
+
+    (uint callPrice, uint putPrice) = BlackScholes
+    .BlackScholesInputs({
+      timeToExpirySec: _timeToMaturitySeconds(expiry),
+      volatilityDecimal: forceCloseVol,
+      spotDecimal: trade.spotPrice,
+      strikePriceDecimal: strike.strikePrice,
+      rateDecimal: exchangeAdapter.rateAndCarry(address(optionMarket))
+    })
+    .optionPrices();
+
+    uint price = (trade.optionType == OptionMarket.OptionType.LONG_PUT ||
+      trade.optionType == OptionMarket.OptionType.SHORT_PUT_QUOTE)
+      ? putPrice
+      : callPrice;
+
+    if (trade.isBuy) {
+      // In the case a short is being closed, ensure the AMM doesn't overpay by charging parity + some excess
+      uint parity = _getParity(strike.strikePrice, trade.spotPrice, trade.optionType);
+      uint minPrice = parity +
+      trade.spotPrice.multiplyDecimal(
+        trade.tradeDirection == OptionMarket.TradeDirection.CLOSE
+          ? forceCloseParams.shortSpotMin
+          : forceCloseParams.liquidateSpotMin
+      );
+      price = Math.max(price, minPrice);
+    }
+
+    return (price, forceCloseVol);
+  }
+  function _getGWAVVolWithOverride(uint boardId, uint strikeId, uint overrideIvPeriod, uint overrideSkewPeriod) internal view returns (uint gwavVol) {
+    uint gwavIV = boardIVGWAV[boardId].getGWAVForPeriod(overrideIvPeriod, 0);
+    uint strikeGWAVSkew = strikeSkewGWAV[strikeId].getGWAVForPeriod(overrideSkewPeriod, 0);
+    return gwavIV.multiplyDecimal(strikeGWAVSkew);
+  }
+  function getMinCollateral(OptionMarket.OptionType optionType, uint strikePrice, uint expiry, uint spotPrice, uint amount) external view returns (uint minCollateral) {
+    if (amount == 0) {
+      return 0;
+    }
+
+    // If put, reduce spot by percentage. If call, increase.
+    uint shockPrice = (optionType == OptionMarket.OptionType.SHORT_PUT_QUOTE)
+      ? spotPrice.multiplyDecimal(minCollatParams.putSpotPriceShock)
+      : spotPrice.multiplyDecimal(minCollatParams.callSpotPriceShock);
+
+    uint timeToMaturity = _timeToMaturitySeconds(expiry);
+
+    (uint callPrice, uint putPrice) = BlackScholes
+    .BlackScholesInputs({
+      timeToExpirySec: timeToMaturity,
+      volatilityDecimal: getShockVol(timeToMaturity),
+      spotDecimal: shockPrice,
+      strikePriceDecimal: strikePrice,
+      rateDecimal: exchangeAdapter.rateAndCarry(address(optionMarket))
+    })
+    .optionPrices();
+
+    uint fullCollat;
+    uint volCollat;
+    uint staticCollat = minCollatParams.minStaticQuoteCollateral;
+    if (optionType == OptionMarket.OptionType.SHORT_CALL_BASE) {
+      // Can be more lenient to SHORT_CALL_BASE traders
+      volCollat = callPrice.multiplyDecimal(amount).divideDecimal(shockPrice);
+      fullCollat = amount;
+      staticCollat = minCollatParams.minStaticBaseCollateral;
+    } else if (optionType == OptionMarket.OptionType.SHORT_CALL_QUOTE) {
+      volCollat = callPrice.multiplyDecimal(amount);
+      fullCollat = type(uint).max;
+    } else {
+      // optionType == OptionMarket.OptionType.SHORT_PUT_QUOTE
+      volCollat = putPrice.multiplyDecimal(amount);
+      fullCollat = amount.multiplyDecimal(strikePrice);
+    }
+
+    return Math.min(Math.max(volCollat, staticCollat), fullCollat);
+  }
+  function getShockVol(uint timeToMaturity) public view returns (uint) {
+    if (timeToMaturity <= minCollatParams.shockVolPointA) {
+      return minCollatParams.shockVolA;
+    }
+    if (timeToMaturity >= minCollatParams.shockVolPointB) {
+      return minCollatParams.shockVolB;
+    }
+
+    // Flip a and b so we don't need to convert to int
+    return
+    minCollatParams.shockVolA -
+    (((minCollatParams.shockVolA - minCollatParams.shockVolB) * (timeToMaturity - minCollatParams.shockVolPointA)) /
+      (minCollatParams.shockVolPointB - minCollatParams.shockVolPointA));
+  }
+
+
   modifier onlyOptionMarket() {
     if (msg.sender != address(optionMarket)) {
       revert OnlyOptionMarket(address(this), msg.sender, address(optionMarket));
     }
     _;
   }
-
   modifier onlyOptionMarketPricer() {
     if (msg.sender != address(optionMarketPricer)) {
       revert OnlyOptionMarketPricer(address(this), msg.sender, address(optionMarketPricer));
     }
     _;
   }
-
-  ////////////
-  // Events //
-  ////////////
   event GreekCacheParametersSet(GreekCacheParameters params);
   event ForceCloseParametersSet(ForceCloseParameters params);
   event MinCollateralParametersSet(MinCollateralParameters params);
-
   event StrikeCacheUpdated(StrikeCache strikeCache);
   event BoardCacheUpdated(OptionBoardCache boardCache);
   event GlobalCacheUpdated(GlobalCache globalCache);
-
   event BoardCacheRemoved(uint boardId);
   event StrikeCacheRemoved(uint strikeId);
   event BoardIvUpdated(uint boardId, uint newIv, uint globalMaxIvVariance);
   event StrikeSkewUpdated(uint strikeId, uint newSkew, uint globalMaxSkewVariance);
-
-  ////////////
-  // Errors //
-  ////////////
-  // Admin
   error InvalidGreekCacheParameters(address thrower, GreekCacheParameters greekCacheParams);
   error InvalidForceCloseParameters(address thrower, ForceCloseParameters forceCloseParams);
   error InvalidMinCollatParams(address thrower, MinCollateralParameters minCollatParams);
-
-  // Board related
   error BoardStrikeLimitExceeded(address thrower, uint boardId, uint newStrikesLength, uint maxStrikesPerBoard);
   error InvalidBoardId(address thrower, uint boardId);
   error CannotUpdateExpiredBoard(address thrower, uint boardId, uint expiry, uint currentTimestamp);
-
-  // Access
   error OnlyOptionMarket(address thrower, address caller, address optionMarket);
   error OnlyOptionMarketPricer(address thrower, address caller, address optionMarketPricer);
 }
