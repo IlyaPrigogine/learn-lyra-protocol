@@ -437,6 +437,25 @@ contract LiquidityPool is Owned, SimpleInitializable, ReentrancyGuard {
       );
     }
   }
+  function _freePutCollateral(uint amountQuote) internal {
+    // In case of rounding errors
+    amountQuote = amountQuote > lockedCollateral.quote ? lockedCollateral.quote : amountQuote;
+    lockedCollateral.quote -= amountQuote;
+    emit PutCollateralFreed(amountQuote, lockedCollateral.quote);
+  }
+  function _freeCallCollateral(uint amountBase) internal {
+    // In case of rounding errors
+    amountBase = amountBase > lockedCollateral.base ? lockedCollateral.base : amountBase;
+    lockedCollateral.base -= amountBase;
+    emit CallCollateralFreed(amountBase, lockedCollateral.base);
+  }
+  function _sendPremium(address recipient, uint recipientAmount, uint optionMarketPortion) internal {
+    _transferQuote(recipient, recipientAmount);
+    _transferQuote(address(optionMarket), optionMarketPortion);
+
+    emit PremiumTransferred(recipient, recipientAmount, optionMarketPortion);
+  }
+
   // onlyOptionMarket
   function lockPutCollateral(uint amount, uint freeLiquidity, uint strikeId) external onlyOptionMarket {
     if (amount.multiplyDecimal(lpParams.putCollatScalingFactor) > freeLiquidity) {
@@ -507,26 +526,6 @@ contract LiquidityPool is Owned, SimpleInitializable, ReentrancyGuard {
     return liquidity.longScaleFactor;
   }
 
-
-  function _freePutCollateral(uint amountQuote) internal {
-    // In case of rounding errors
-    amountQuote = amountQuote > lockedCollateral.quote ? lockedCollateral.quote : amountQuote;
-    lockedCollateral.quote -= amountQuote;
-    emit PutCollateralFreed(amountQuote, lockedCollateral.quote);
-  }
-  function _freeCallCollateral(uint amountBase) internal {
-    // In case of rounding errors
-    amountBase = amountBase > lockedCollateral.base ? lockedCollateral.base : amountBase;
-    lockedCollateral.base -= amountBase;
-    emit CallCollateralFreed(amountBase, lockedCollateral.base);
-  }
-  function _sendPremium(address recipient, uint recipientAmount, uint optionMarketPortion) internal {
-    _transferQuote(recipient, recipientAmount);
-    _transferQuote(address(optionMarket), optionMarketPortion);
-
-    emit PremiumTransferred(recipient, recipientAmount, optionMarketPortion);
-  }
-
   // onlyShortCollateral
   function sendSettlementValue(address user, uint amount) external onlyShortCollateral {
     // To prevent any potential rounding errors
@@ -575,6 +574,51 @@ contract LiquidityPool is Owned, SimpleInitializable, ReentrancyGuard {
 
     emit InsolventSettlementAmountUpdated(quoteSpent, insolventSettlementAmount);
   }
+  function exchangeBase() public nonReentrant {
+    uint currentBaseBalance = baseAsset.balanceOf(address(this));
+    if (currentBaseBalance > 0) {
+      if (!baseAsset.approve(address(exchangeAdapter), currentBaseBalance)) {
+        revert BaseApprovalFailure(address(this), address(exchangeAdapter), currentBaseBalance);
+      }
+      currentBaseBalance = ConvertDecimals.convertTo18(currentBaseBalance, baseAsset.decimals());
+      uint quoteReceived = exchangeAdapter.exchangeFromExactBase(address(optionMarket), currentBaseBalance);
+      emit BaseSold(currentBaseBalance, quoteReceived);
+    }
+  }
+  function updateLiquidationInsolvency(uint insolvencyAmountInQuote) external onlyOptionMarket {
+    liquidationInsolventAmount += insolvencyAmountInQuote;
+  }
+  function transferQuoteToHedge(uint amount) external onlyPoolHedger returns (uint) {
+    Liquidity memory liquidity = getLiquidity();
+
+    uint available = liquidity.pendingDeltaLiquidity + liquidity.freeLiquidity;
+
+    amount = amount > available ? available : amount;
+
+    _transferQuote(address(poolHedger), amount);
+    emit QuoteTransferredToPoolHedger(amount);
+
+    return amount;
+  }
+  function _transferQuote(address to, uint amount) internal {
+    amount = ConvertDecimals.convertFrom18(amount, quoteAsset.decimals());
+    if (amount > 0) {
+      if (!quoteAsset.transfer(to, amount)) {
+        revert QuoteTransferFailed(address(this), address(this), to, amount);
+      }
+    }
+  }
+  function _tryTransferQuote(address to, uint amount) internal returns (bool success) {
+    amount = ConvertDecimals.convertFrom18(amount, quoteAsset.decimals());
+    if (amount > 0) {
+      try quoteAsset.transfer(to, amount) returns (bool res) {
+        return res;
+      } catch {
+        return false;
+      }
+    }
+    return true;
+  }
 
   // views
   function getTotalTokenSupply() public view returns (uint) {
@@ -593,20 +637,6 @@ contract LiquidityPool is Owned, SimpleInitializable, ReentrancyGuard {
     Liquidity memory liquidity = getLiquidity();
     return _getTokenPrice(liquidity.NAV, getTotalTokenSupply());
   }
-  function _getTokenPrice(uint totalPoolValue, uint totalTokenSupply) internal pure returns (uint) {
-    if (totalTokenSupply == 0) {
-      return DecimalMath.UNIT;
-    }
-    return totalPoolValue.divideDecimal(totalTokenSupply);
-  }
-
-  ////////////////////////////
-  // Getting Pool Liquidity //
-  ////////////////////////////
-
-  /**
-   * @notice Same return as `getCurrentLiquidity()` but with manual spot price
-   */
   function getLiquidity() public view returns (Liquidity memory) {
     uint spotPrice = exchangeAdapter.getSpotPriceForMarket(
       address(optionMarket),
@@ -630,7 +660,22 @@ contract LiquidityPool is Owned, SimpleInitializable, ReentrancyGuard {
 
     return liquidity;
   }
-
+  function getTotalPoolValueQuote() external view returns (uint totalPoolValue) {
+    Liquidity memory liquidity = getLiquidity();
+    return liquidity.NAV;
+  }
+  function getLpParams() external view returns (LiquidityPoolParameters memory) {
+    return lpParams;
+  }
+  function getCBParams() external view returns (CircuitBreakerParameters memory) {
+    return cbParams;
+  }
+  function _getTokenPrice(uint totalPoolValue, uint totalTokenSupply) internal pure returns (uint) {
+    if (totalTokenSupply == 0) {
+      return DecimalMath.UNIT;
+    }
+    return totalPoolValue.divideDecimal(totalTokenSupply);
+  }
   function _getLiquidityAndUpdateCB() internal returns (Liquidity memory liquidity) {
     liquidity = getLiquidity();
 
@@ -638,18 +683,7 @@ contract LiquidityPool is Owned, SimpleInitializable, ReentrancyGuard {
     OptionGreekCache.GlobalCache memory globalCache = greekCache.getGlobalCache();
     _updateCBs(liquidity, globalCache.maxIvVariance, globalCache.maxSkewVariance, globalCache.netGreeks.netOptionValue);
   }
-
-  /// @dev Gets the current NAV
-  function getTotalPoolValueQuote() external view returns (uint totalPoolValue) {
-    Liquidity memory liquidity = getLiquidity();
-    return liquidity.NAV;
-  }
-
-  function _getTotalPoolValueQuote(
-    uint basePrice,
-    uint usedDeltaLiquidity,
-    int optionValueDebt
-  ) internal view returns (uint, uint) {
+  function _getTotalPoolValueQuote(uint basePrice, uint usedDeltaLiquidity, int optionValueDebt) internal view returns (uint, uint) {
     int totalAssetValue = SafeCast.toInt256(
       ConvertDecimals.convertTo18(quoteAsset.balanceOf(address(this)), quoteAsset.decimals()) +
         ConvertDecimals.convertTo18(baseAsset.balanceOf(address(this)), baseAsset.decimals()).multiplyDecimal(basePrice)
@@ -688,15 +722,7 @@ contract LiquidityPool is Owned, SimpleInitializable, ReentrancyGuard {
       longScaleFactor
     );
   }
-
-  function _getLiquidity(
-    uint basePrice,
-    uint totalPoolValue,
-    uint reservedTokenValue,
-    uint usedDelta,
-    uint pendingDelta,
-    uint longScaleFactor
-  ) internal view returns (Liquidity memory) {
+  function _getLiquidity(uint basePrice, uint totalPoolValue, uint reservedTokenValue, uint usedDelta, uint pendingDelta, uint longScaleFactor) internal view returns (Liquidity memory) {
     Liquidity memory liquidity = Liquidity(0, 0, 0, 0, 0, 0, 0);
     liquidity.NAV = totalPoolValue;
     liquidity.usedDeltaLiquidity = usedDelta;
@@ -723,58 +749,12 @@ contract LiquidityPool is Owned, SimpleInitializable, ReentrancyGuard {
 
     return liquidity;
   }
-
-  /////////////////////
-  // Exchanging Base //
-  /////////////////////
-
-  /// @notice Will exchange any base balance for quote
-  function exchangeBase() public nonReentrant {
-    uint currentBaseBalance = baseAsset.balanceOf(address(this));
-    if (currentBaseBalance > 0) {
-      if (!baseAsset.approve(address(exchangeAdapter), currentBaseBalance)) {
-        revert BaseApprovalFailure(address(this), address(exchangeAdapter), currentBaseBalance);
-      }
-      currentBaseBalance = ConvertDecimals.convertTo18(currentBaseBalance, baseAsset.decimals());
-      uint quoteReceived = exchangeAdapter.exchangeFromExactBase(address(optionMarket), currentBaseBalance);
-      emit BaseSold(currentBaseBalance, quoteReceived);
-    }
-  }
-
-  //////////
-  // Misc //
-  //////////
-
-  /// @notice returns the LiquidityPoolParameters struct
-  function getLpParams() external view returns (LiquidityPoolParameters memory) {
-    return lpParams;
-  }
-
-  /// @notice returns the CircuitBreakerParameters struct
-  function getCBParams() external view returns (CircuitBreakerParameters memory) {
-    return cbParams;
-  }
-
-  /// @notice updates `liquidationInsolventAmount` if liquidated position is insolveny
-  function updateLiquidationInsolvency(uint insolvencyAmountInQuote) external onlyOptionMarket {
-    liquidationInsolventAmount += insolvencyAmountInQuote;
-  }
-
-  /**
-   * @dev get the total amount of quote used and pending for delta hedging
-   *
-   * @return pendingDeltaLiquidity The amount of liquidity reserved for delta hedging that hasn't occured yet
-   * @return usedDeltaLiquidity The value of the current hedge position (long value OR collateral - short debt)
-   */
-  function _getPoolHedgerLiquidity(
-    uint basePrice
-  ) internal view returns (uint pendingDeltaLiquidity, uint usedDeltaLiquidity) {
+  function _getPoolHedgerLiquidity(uint basePrice) internal view returns (uint pendingDeltaLiquidity, uint usedDeltaLiquidity) {
     if (address(poolHedger) != address(0)) {
       return poolHedger.getHedgingLiquidity(basePrice);
     }
     return (0, 0);
   }
-
   function _checkCanHedge(uint amountOptions, bool increasesPoolDelta, uint strikeId) internal view {
     if (address(poolHedger) == address(0)) {
       return;
@@ -784,226 +764,65 @@ contract LiquidityPool is Owned, SimpleInitializable, ReentrancyGuard {
     }
   }
 
-  /**
-   * @notice Sends quote to the PoolHedger.
-   * @dev Transfer amount up to `pendingLiquidity + freeLiquidity`.
-   * The hedger must determine what to do with the amount received.
-   *
-   * @param amount The amount requested by the PoolHedger.
-   */
-  function transferQuoteToHedge(uint amount) external onlyPoolHedger returns (uint) {
-    Liquidity memory liquidity = getLiquidity();
-
-    uint available = liquidity.pendingDeltaLiquidity + liquidity.freeLiquidity;
-
-    amount = amount > available ? available : amount;
-
-    _transferQuote(address(poolHedger), amount);
-    emit QuoteTransferredToPoolHedger(amount);
-
-    return amount;
-  }
-
-  function _transferQuote(address to, uint amount) internal {
-    amount = ConvertDecimals.convertFrom18(amount, quoteAsset.decimals());
-    if (amount > 0) {
-      if (!quoteAsset.transfer(to, amount)) {
-        revert QuoteTransferFailed(address(this), address(this), to, amount);
-      }
-    }
-  }
-
-  function _tryTransferQuote(address to, uint amount) internal returns (bool success) {
-    amount = ConvertDecimals.convertFrom18(amount, quoteAsset.decimals());
-    if (amount > 0) {
-      try quoteAsset.transfer(to, amount) returns (bool res) {
-        return res;
-      } catch {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  ///////////////
-  // Modifiers //
-  ///////////////
-
   modifier onlyPoolHedger() {
     if (msg.sender != address(poolHedger)) {
       revert OnlyPoolHedger(address(this), msg.sender, address(poolHedger));
     }
     _;
   }
-
   modifier onlyOptionMarket() {
     if (msg.sender != address(optionMarket)) {
       revert OnlyOptionMarket(address(this), msg.sender, address(optionMarket));
     }
     _;
   }
-
   modifier onlyShortCollateral() {
     if (msg.sender != address(shortCollateral)) {
       revert OnlyShortCollateral(address(this), msg.sender, address(shortCollateral));
     }
     _;
   }
-
-  ////////////
-  // Events //
-  ////////////
-
-  /// @dev Emitted whenever the pool parameters are updated
   event LiquidityPoolParametersUpdated(LiquidityPoolParameters lpParams);
-
-  /// @dev Emitted whenever the circuit breaker parameters are updated
   event CircuitBreakerParametersUpdated(CircuitBreakerParameters cbParams);
-
-  /// @dev Emitted whenever the poolHedger address is modified
   event PoolHedgerUpdated(PoolHedger poolHedger);
-
-  /// @dev Emitted when AMM put collateral is locked.
   event PutCollateralLocked(uint quoteLocked, uint lockedCollateralQuote);
-
-  /// @dev Emitted when quote is freed.
   event PutCollateralFreed(uint quoteFreed, uint lockedCollateralQuote);
-
-  /// @dev Emitted when AMM call collateral is locked.
   event CallCollateralLocked(uint baseLocked, uint lockedCollateralBase);
-
-  /// @dev Emitted when base is freed.
   event CallCollateralFreed(uint baseFreed, uint lockedCollateralBase);
-
-  /// @dev Emitted when a board is settled.
   event BoardSettlement(uint insolventSettlementAmount, uint amountQuoteReserved, uint totalOutstandingSettlements);
-
-  /// @dev Emitted when reserved quote is sent.
   event OutstandingSettlementSent(address indexed user, uint amount, uint totalOutstandingSettlements);
-
-  /// @dev Emitted whenever quote is exchanged for base
   event BasePurchased(uint quoteSpent, uint baseReceived);
-
-  /// @dev Emitted whenever base is exchanged for quote
   event BaseSold(uint amountBase, uint quoteReceived);
-
-  /// @dev Emitted whenever premium is sent to a trader closing their position
   event PremiumTransferred(address indexed recipient, uint recipientPortion, uint optionMarketPortion);
-
-  /// @dev Emitted whenever quote is sent to the PoolHedger
   event QuoteTransferredToPoolHedger(uint amountQuote);
-
-  /// @dev Emitted whenever the insolvent settlement amount is updated (settlement and excess)
   event InsolventSettlementAmountUpdated(uint amountQuoteAdded, uint totalInsolventSettlementAmount);
-
-  /// @dev Emitted whenever a user deposits and enters the queue.
-  event DepositQueued(
-    address indexed depositor,
-    address indexed beneficiary,
-    uint indexed depositQueueId,
-    uint amountDeposited,
-    uint totalQueuedDeposits,
-    uint timestamp
-  );
-
-  /// @dev Emitted whenever a deposit gets processed. Note, can be processed without being queued.
-  ///  QueueId of 0 indicates it was not queued.
-  event DepositProcessed(
-    address indexed caller,
-    address indexed beneficiary,
-    uint indexed depositQueueId,
-    uint amountDeposited,
-    uint tokenPrice,
-    uint tokensReceived,
-    uint timestamp
-  );
-
-  /// @dev Emitted whenever a deposit gets processed. Note, can be processed without being queued.
-  ///  QueueId of 0 indicates it was not queued.
-  event WithdrawProcessed(
-    address indexed caller,
-    address indexed beneficiary,
-    uint indexed withdrawalQueueId,
-    uint amountWithdrawn,
-    uint tokenPrice,
-    uint quoteReceived,
-    uint totalQueuedWithdrawals,
-    uint timestamp
-  );
-  event WithdrawPartiallyProcessed(
-    address indexed caller,
-    address indexed beneficiary,
-    uint indexed withdrawalQueueId,
-    uint amountWithdrawn,
-    uint tokenPrice,
-    uint quoteReceived,
-    uint totalQueuedWithdrawals,
-    uint timestamp
-  );
-  event WithdrawReverted(
-    address indexed caller,
-    address indexed beneficiary,
-    uint indexed withdrawalQueueId,
-    uint tokenPrice,
-    uint totalQueuedWithdrawals,
-    uint timestamp,
-    uint tokensReturned
-  );
-  event WithdrawQueued(
-    address indexed withdrawer,
-    address indexed beneficiary,
-    uint indexed withdrawalQueueId,
-    uint amountWithdrawn,
-    uint totalQueuedWithdrawals,
-    uint timestamp
-  );
-
-  /// @dev Emitted whenever the CB timestamp is updated
-  event CircuitBreakerUpdated(
-    uint newTimestamp,
-    bool ivVarianceThresholdCrossed,
-    bool skewVarianceThresholdCrossed,
-    bool liquidityThresholdCrossed,
-    bool contractAdjustmentEvent
-  );
-
-  /// @dev Emitted whenever the CB timestamp is updated from a board settlement
+  event DepositQueued(address indexed depositor, address indexed beneficiary, uint indexed depositQueueId, uint amountDeposited, uint totalQueuedDeposits, uint timestamp);
+  event DepositProcessed(address indexed caller, address indexed beneficiary, uint indexed depositQueueId, uint amountDeposited, uint tokenPrice, uint tokensReceived, uint timestamp);
+  event WithdrawProcessed(address indexed caller, address indexed beneficiary, uint indexed withdrawalQueueId, uint amountWithdrawn, uint tokenPrice, uint quoteReceived, uint totalQueuedWithdrawals, uint timestamp);
+  event WithdrawPartiallyProcessed(address indexed caller, address indexed beneficiary, uint indexed withdrawalQueueId, uint amountWithdrawn, uint tokenPrice, uint quoteReceived, uint totalQueuedWithdrawals, uint timestamp);
+  event WithdrawReverted(address indexed caller, address indexed beneficiary, uint indexed withdrawalQueueId, uint tokenPrice, uint totalQueuedWithdrawals, uint timestamp, uint tokensReturned);
+  event WithdrawQueued(address indexed withdrawer, address indexed beneficiary, uint indexed withdrawalQueueId, uint amountWithdrawn, uint totalQueuedWithdrawals, uint timestamp);
+  event CircuitBreakerUpdated(uint newTimestamp, bool ivVarianceThresholdCrossed, bool skewVarianceThresholdCrossed, bool liquidityThresholdCrossed, bool contractAdjustmentEvent);
   event BoardSettlementCircuitBreakerUpdated(uint newTimestamp);
-
-  /// @dev Emitted whenever a queue item is checked for the ability to be processed
   event CheckingCanProcess(uint entryId, bool boardNotStale, bool validEntry, bool guardianBypass, bool delaysExpired);
 
-  ////////////
-  // Errors //
-  ////////////
-  // Admin
   error InvalidLiquidityPoolParameters(address thrower, LiquidityPoolParameters lpParams);
   error InvalidCircuitBreakerParameters(address thrower, CircuitBreakerParameters cbParams);
   error CannotRecoverQuoteBase(address thrower);
-
-  // Deposits and withdrawals
   error InvalidBeneficiaryAddress(address thrower, address beneficiary);
   error MinimumDepositNotMet(address thrower, uint amountQuote, uint minDeposit);
   error MinimumWithdrawNotMet(address thrower, uint amountQuote, uint minWithdraw);
-
-  // Liquidity and accounting
   error LockingMoreQuoteThanIsFree(address thrower, uint quoteToLock, uint freeLiquidity, Collateral lockedCollateral);
   error SendPremiumNotEnoughCollateral(address thrower, uint premium, uint reservedFee, uint freeLiquidity);
   error NotEnoughFreeToReclaimInsolvency(address thrower, uint amountQuote, Liquidity liquidity);
   error OptionValueDebtExceedsTotalAssets(address thrower, int totalAssetValue, int optionValueDebt);
   error NegativeTotalAssetValue(address thrower, int totalAssetValue);
-
-  // Access
   error OnlyPoolHedger(address thrower, address caller, address poolHedger);
   error OnlyOptionMarket(address thrower, address caller, address optionMarket);
   error OnlyShortCollateral(address thrower, address caller, address poolHedger);
-
-  // Token transfers
   error QuoteTransferFailed(address thrower, address from, address to, uint realAmount);
   error BaseTransferFailed(address thrower, address from, address to, uint realAmount);
   error QuoteApprovalFailure(address thrower, address approvee, uint amount);
   error BaseApprovalFailure(address thrower, address approvee, uint amount);
-
-  // @dev Emmitted whenever a position can not be opened as the hedger is unable to hedge
   error UnableToHedgeDelta(address thrower, uint amountOptions, bool increasesDelta, uint strikeId);
 }
